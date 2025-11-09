@@ -43,6 +43,13 @@ enum GenericArgumentPattern {
   Argument(Box<SegmentMatcher>),
   Wildcard,
   Binding(Span, Ident),
+  AssociatedType(Span, Ident, AssociatedTypes),
+}
+
+enum AssociatedTypes {
+  Wildcard,
+  Binding(Span, Ident),
+  Argument(Box<SegmentMatcher>),
 }
 
 struct PathMatchArms {
@@ -177,19 +184,48 @@ impl Parse for ArgumentPattern {
         let mut name: Ident = input.parse()?;
         let span = name.span();
         name.set_span(Span::call_site());
+
         args.push(GenericArgumentPattern::Binding(span, name));
       } else {
         let ident: Ident = input.parse()?;
 
-        let matcher = SegmentMatcher {
-          ident,
-          args: if input.peek(Token![<]) {
-            Some(input.parse()?)
+        if input.peek(Token![=]) {
+          input.parse::<Token![=]>()?;
+
+          let value = if input.peek(Token![_]) {
+            input.parse::<Token![_]>()?;
+            AssociatedTypes::Wildcard
+          } else if input.peek(Token![$]) {
+            input.parse::<Token![$]>()?;
+            let mut name: Ident = input.parse()?;
+            let span = name.span();
+            name.set_span(Span::call_site());
+            AssociatedTypes::Binding(span, name)
           } else {
-            None
-          },
-        };
-        args.push(GenericArgumentPattern::Argument(Box::new(matcher)));
+            let value_ident: Ident = input.parse()?;
+            let value_matcher = SegmentMatcher {
+              ident: value_ident,
+              args: if input.peek(Token![<]) {
+                Some(input.parse()?)
+              } else {
+                None
+              },
+            };
+            AssociatedTypes::Argument(Box::new(value_matcher))
+          };
+
+          args.push(GenericArgumentPattern::AssociatedType(ident.span(), ident, value));
+        } else {
+          let matcher = SegmentMatcher {
+            ident,
+            args: if input.peek(Token![<]) {
+              Some(input.parse()?)
+            } else {
+              None
+            },
+          };
+          args.push(GenericArgumentPattern::Argument(Box::new(matcher)));
+        }
       }
 
       if input.peek(Token![,]) {
@@ -247,6 +283,17 @@ fn generate_path_matcher(
                       }
                       GenericArgumentPattern::Argument(arg) => {
                         handle_segment_matcher(binding_names, &*arg);
+                      }
+                      GenericArgumentPattern::AssociatedType(_, _, value) => {
+                        match value {
+                          AssociatedTypes::Binding(span, name) => {
+                            binding_names.push((span.clone(), name.clone()));
+                          }
+                          AssociatedTypes::Argument(arg) => {
+                            handle_segment_matcher(binding_names, &*arg);
+                          }
+                          AssociatedTypes::Wildcard => {}
+                        }
                       }
                       GenericArgumentPattern::Wildcard => {}
                     }
@@ -423,6 +470,66 @@ fn generate_path_matcher(
                                     }
                                   });
                                 }
+                                GenericArgumentPattern::AssociatedType(
+                                  _span,
+                                  ident,
+                                  value,
+                                ) => {
+                                  let nested_arg_var =
+                                    format!("__nested_arg_{}", depth);
+                                  let nested_arg_var_ident = Ident::new(
+                                    &nested_arg_var,
+                                    Span::call_site(),
+                                  );
+                                  let ident_str = ident.to_string();
+
+                                  match value {
+                                    AssociatedTypes::Wildcard => {
+                                      nested_arg_checks.push(quote! {
+                                        if
+                                          let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
+                                            && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
+                                            && __assoc_type.ident == #ident_str
+                                        {
+                                          //
+                                        } else {
+                                          break false;
+                                        }
+                                      });
+                                    }
+                                    AssociatedTypes::Binding(_, name) => {
+                                      nested_arg_checks.push(quote! {
+                                        if
+                                          let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
+                                            && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
+                                            && __assoc_type.ident == #ident_str
+                                        {
+                                          #name = Some(&__assoc_type.ty);
+                                        } else {
+                                          break false;
+                                        }
+                                      });
+                                    }
+                                    AssociatedTypes::Argument(type_matcher) => {
+                                      let type_ident = &type_matcher.ident;
+                                      let type_ident_str = type_ident.to_string();
+                                      nested_arg_checks.push(quote! {
+                                        if
+                                          let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
+                                            && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
+                                            && __assoc_type.ident == #ident_str
+                                            && let syn::Type::Path(__type_path) = &__assoc_type.ty
+                                            && let Some(__last_seg) = __type_path.path.segments.last()
+                                            && __last_seg.ident == #type_ident_str
+                                        {
+                                          //
+                                        } else {
+                                          break false;
+                                        }
+                                      });
+                                    }
+                                  }
+                                }
                               }
                             }
 
@@ -480,6 +587,58 @@ fn generate_path_matcher(
                             break false;
                           }
                         });
+                      }
+                      GenericArgumentPattern::AssociatedType(_span, ident, value) => {
+                        let ident_str = ident.to_string();
+
+                        match value {
+                          AssociatedTypes::Wildcard => {
+                            arg_checks.push(quote! {
+                              if
+                                let Some(__arg) = __args.get(#arg_idx)
+                                  && let syn::GenericArgument::AssocType(__assoc_type) = __arg
+                                  && __assoc_type.ident == #ident_str
+                              {
+                                //
+                              } else {
+                                break false;
+                              }
+                            });
+                          }
+                          AssociatedTypes::Binding(_, name) => {
+                            arg_checks.push(quote! {
+                              if
+                                let Some(__arg) = __args.get(#arg_idx)
+                                  && let syn::GenericArgument::AssocType(__assoc_type) = __arg
+                                  && __assoc_type.ident == #ident_str
+                              {
+                                #name = Some(&__assoc_type.ty);
+                              } else {
+                                break false;
+                              }
+                            });
+                          }
+                          AssociatedTypes::Argument(type_matcher) => {
+                            // For type argument matching, we need to check both the ident and the type
+                            let type_ident = &type_matcher.ident;
+                            let type_ident_str = type_ident.to_string();
+
+                            arg_checks.push(quote! {
+                              if
+                                let Some(__arg) = __args.get(#arg_idx)
+                                  && let syn::GenericArgument::AssocType(__assoc_type) = __arg
+                                  && __assoc_type.ident == #ident_str
+                                  && let syn::Type::Path(__type_path) = &__assoc_type.ty
+                                  && let Some(__last_seg) = __type_path.path.segments.last()
+                                  && __last_seg.ident == #type_ident_str
+                              {
+                                //
+                              } else {
+                                break false;
+                              }
+                            });
+                          }
+                        }
                       }
                     }
                   }

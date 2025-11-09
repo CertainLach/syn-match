@@ -196,3 +196,68 @@ fn test_result_generic_bindings() {
 
   assert_eq!(result, "Result<String, Error>");
 }
+
+#[test]
+fn test_type_assignment() {
+  let path: syn::Path = syn::parse_quote!(Future<Output = String>);
+  
+  let result = path_match!(
+    &path,
+    Future<Output = $output> => {
+      if let syn::Type::Path(type_path) = output {
+        format!("Future output: {}", type_path.path.segments.last().unwrap().ident.to_string())
+      } else {
+        "not a path".to_string()
+      }
+    },
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "Future output: String");
+}
+
+#[test]
+fn test_type_assignment_mismatch() {
+  let path: syn::Path = syn::parse_quote!(Future<Input = String>);
+
+  let result = path_match!(
+    &path,
+    Future<Output = $output> => {
+      if let syn::Type::Path(type_path) = output {
+        format!("Future output: {}", type_path.path.segments.last().unwrap().ident.to_string())
+      } else {
+        "not a path".to_string()
+      }
+    },
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "no match");
+}
+
+#[test]
+fn test_type_assignment_wildcard() {
+  let path: syn::Path = syn::parse_quote!(Future<Output = String>);
+
+  let result = path_match!(
+    &path,
+    Future<Output = _> => "matched with wildcard",
+    _ => "no match",
+  );
+
+  assert_eq!(result, "matched with wildcard");
+}
+
+#[test]
+fn test_type_assignment_specific_type() {
+  let path: syn::Path = syn::parse_quote!(Future<Output = String>);
+
+  let result = path_match!(
+    &path,
+    Future<Output = String> => "matched specific type",
+    Future<Output = i32> => "matched i32",
+    _ => "no match",
+  );
+
+  assert_eq!(result, "matched specific type");
+}
