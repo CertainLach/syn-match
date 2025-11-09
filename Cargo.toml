@@ -2,6 +2,9 @@
 name = "syn-match"
 version = "0.1.0"
 edition = "2024"
+description = "a macro for matching on syn paths"
+repository = "https://github.com/crowlKats/syn-match"
+license-file = "LICENSE"
 
 [dependencies]
 syn = { version = "2", features = ["full"] }

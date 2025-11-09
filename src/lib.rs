@@ -210,8 +210,6 @@ struct PathMatcher {
   length_check: proc_macro2::TokenStream,
   segment_checks: Vec<proc_macro2::TokenStream>,
   binding_names: Vec<(Span, Ident)>,
-  min_len: usize,
-  max_len: Option<usize>,
 }
 
 fn generate_path_matcher(
@@ -574,8 +572,6 @@ fn generate_path_matcher(
           length_check,
           segment_checks,
           binding_names,
-          min_len,
-          max_len,
         })
       }
     }
@@ -632,8 +628,6 @@ pub fn path_match(input: TokenStream) -> TokenStream {
       length_check,
       segment_checks,
       binding_names,
-      min_len: _,
-      max_len: _,
     } in path_matchers
     {
       match_checks.push((
