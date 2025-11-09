@@ -25,6 +25,7 @@ enum SegmentPattern {
   Optional(SegmentMatcher),
   Binding {
     span: Span,
+    lifetime: bool,
     name: Ident,
     multi: bool,
   },
@@ -42,13 +43,13 @@ enum ArgumentPattern {
 enum GenericArgumentPattern {
   Argument(Box<SegmentMatcher>),
   Wildcard,
-  Binding(Span, Ident),
+  Binding(Span, bool, Ident),
   AssociatedType(Span, Ident, AssociatedTypes),
 }
 
 enum AssociatedTypes {
   Wildcard,
-  Binding(Span, Ident),
+  Binding(Span, bool, Ident),
   Argument(Box<SegmentMatcher>),
 }
 
@@ -112,9 +113,16 @@ impl Parse for PathPattern {
     loop {
       if input.peek(Token![$]) {
         input.parse::<Token![$]>()?;
-        let mut name: Ident = input.parse()?;
-        let multi = if input.peek(Token![+]) {
-          input.parse::<Token![+]>()?;
+
+        let (lifetime, mut name) = if input.peek(syn::Lifetime) {
+          let lt: syn::Lifetime = input.parse()?;
+          (true, lt.ident)
+        } else {
+          (false, input.parse()?)
+        };
+
+        let multi = if input.peek(Token![*]) {
+          input.parse::<Token![*]>()?;
           true
         } else {
           false
@@ -123,7 +131,12 @@ impl Parse for PathPattern {
         let span = name.span();
         name.set_span(Span::call_site());
 
-        segments.push(SegmentPattern::Binding { span, name, multi });
+        segments.push(SegmentPattern::Binding {
+          span,
+          lifetime,
+          name,
+          multi,
+        });
 
         if input.peek(Token![::]) {
           input.parse::<Token![::]>()?;
@@ -181,11 +194,18 @@ impl Parse for ArgumentPattern {
         args.push(GenericArgumentPattern::Wildcard);
       } else if input.peek(Token![$]) {
         input.parse::<Token![$]>()?;
-        let mut name: Ident = input.parse()?;
+
+        let (lifetime, mut name) = if input.peek(syn::Lifetime) {
+          let lt: syn::Lifetime = input.parse()?;
+          (true, lt.ident)
+        } else {
+          (false, input.parse()?)
+        };
+
         let span = name.span();
         name.set_span(Span::call_site());
 
-        args.push(GenericArgumentPattern::Binding(span, name));
+        args.push(GenericArgumentPattern::Binding(span, lifetime, name));
       } else {
         let ident: Ident = input.parse()?;
 
@@ -197,10 +217,17 @@ impl Parse for ArgumentPattern {
             AssociatedTypes::Wildcard
           } else if input.peek(Token![$]) {
             input.parse::<Token![$]>()?;
-            let mut name: Ident = input.parse()?;
+
+            let (lifetime, mut name) = if input.peek(syn::Lifetime) {
+              let lt: syn::Lifetime = input.parse()?;
+              (true, lt.ident)
+            } else {
+              (false, input.parse()?)
+            };
+
             let span = name.span();
             name.set_span(Span::call_site());
-            AssociatedTypes::Binding(span, name)
+            AssociatedTypes::Binding(span, lifetime, name)
           } else {
             let value_ident: Ident = input.parse()?;
             let value_matcher = SegmentMatcher {
@@ -214,7 +241,11 @@ impl Parse for ArgumentPattern {
             AssociatedTypes::Argument(Box::new(value_matcher))
           };
 
-          args.push(GenericArgumentPattern::AssociatedType(ident.span(), ident, value));
+          args.push(GenericArgumentPattern::AssociatedType(
+            ident.span(),
+            ident,
+            value,
+          ));
         } else {
           let matcher = SegmentMatcher {
             ident,
@@ -245,7 +276,7 @@ struct PathMatcher {
   fully_qualified_check: proc_macro2::TokenStream,
   length_check: proc_macro2::TokenStream,
   segment_checks: Vec<proc_macro2::TokenStream>,
-  binding_names: Vec<(Span, Ident)>,
+  binding_names: Vec<(Span, bool, Ident)>,
 }
 
 fn generate_path_matcher(
@@ -264,13 +295,18 @@ fn generate_path_matcher(
         let mut binding_names = Vec::new();
         for seg in segments {
           match seg {
-            SegmentPattern::Binding { span, name, .. } => {
-              binding_names.push((span.clone(), name.clone()));
+            SegmentPattern::Binding {
+              span,
+              lifetime,
+              name,
+              ..
+            } => {
+              binding_names.push((span.clone(), *lifetime, name.clone()));
             }
             SegmentPattern::Required(matcher)
             | SegmentPattern::Optional(matcher) => {
               fn handle_segment_matcher(
-                binding_names: &mut Vec<(Span, Ident)>,
+                binding_names: &mut Vec<(Span, bool, Ident)>,
                 matcher: &SegmentMatcher,
               ) {
                 if let Some(ArgumentPattern::AngleBracketed(args)) =
@@ -278,16 +314,24 @@ fn generate_path_matcher(
                 {
                   for arg in args {
                     match arg {
-                      GenericArgumentPattern::Binding(span, name) => {
-                        binding_names.push((span.clone(), name.clone()));
+                      GenericArgumentPattern::Binding(span, lifetime, name) => {
+                        binding_names.push((
+                          span.clone(),
+                          *lifetime,
+                          name.clone(),
+                        ));
                       }
                       GenericArgumentPattern::Argument(arg) => {
                         handle_segment_matcher(binding_names, &*arg);
                       }
                       GenericArgumentPattern::AssociatedType(_, _, value) => {
                         match value {
-                          AssociatedTypes::Binding(span, name) => {
-                            binding_names.push((span.clone(), name.clone()));
+                          AssociatedTypes::Binding(span, lifetime, name) => {
+                            binding_names.push((
+                              span.clone(),
+                              *lifetime,
+                              name.clone(),
+                            ));
                           }
                           AssociatedTypes::Argument(arg) => {
                             handle_segment_matcher(binding_names, &*arg);
@@ -431,6 +475,7 @@ fn generate_path_matcher(
                               match nested_arg_pattern {
                                 GenericArgumentPattern::Binding(
                                   _span,
+                                  lifetime,
                                   name,
                                 ) => {
                                   let nested_arg_var =
@@ -439,13 +484,23 @@ fn generate_path_matcher(
                                     &nested_arg_var,
                                     Span::call_site(),
                                   );
-                                  nested_arg_checks.push(quote! {
-                                    if let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx) {
-                                      #name = Some(#nested_arg_var_ident);
-                                    } else {
-                                      break false;
-                                    }
-                                  });
+                                  if *lifetime {
+                                    nested_arg_checks.push(quote! {
+                                      if let Some(syn::GenericArgument::Lifetime(#nested_arg_var_ident)) = __nested_args.get(#nested_arg_idx) {
+                                        #name = Some(#nested_arg_var_ident);
+                                      } else {
+                                        break false;
+                                      }
+                                    });
+                                  } else {
+                                    nested_arg_checks.push(quote! {
+                                      if let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx) {
+                                        #name = Some(#nested_arg_var_ident);
+                                      } else {
+                                        break false;
+                                      }
+                                    });
+                                  }
                                 }
                                 GenericArgumentPattern::Wildcard => {}
                                 GenericArgumentPattern::Argument(
@@ -497,22 +552,45 @@ fn generate_path_matcher(
                                         }
                                       });
                                     }
-                                    AssociatedTypes::Binding(_, name) => {
-                                      nested_arg_checks.push(quote! {
-                                        if
-                                          let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
-                                            && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
-                                            && __assoc_type.ident == #ident_str
-                                        {
-                                          #name = Some(&__assoc_type.ty);
-                                        } else {
-                                          break false;
-                                        }
-                                      });
+                                    AssociatedTypes::Binding(
+                                      _,
+                                      lifetime,
+                                      name,
+                                    ) => {
+                                      if *lifetime {
+                                        nested_arg_checks.push(quote! {
+                                          if
+                                            let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
+                                              && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
+                                              && __assoc_type.ident == #ident_str
+                                              && let syn::Type::Path(__assoc_path) = &__assoc_type.ty
+                                              && let Some(__assoc_seg) = __assoc_path.path.segments.first()
+                                              && let syn::PathArguments::AngleBracketed(__assoc_angle_args) = &__assoc_seg.arguments
+                                              && let Some(syn::GenericArgument::Lifetime(__lt)) = __assoc_angle_args.args.first()
+                                          {
+                                            #name = Some(__lt);
+                                          } else {
+                                            break false;
+                                          }
+                                        });
+                                      } else {
+                                        nested_arg_checks.push(quote! {
+                                          if
+                                            let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
+                                              && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
+                                              && __assoc_type.ident == #ident_str
+                                          {
+                                            #name = Some(&__assoc_type.ty);
+                                          } else {
+                                            break false;
+                                          }
+                                        });
+                                      }
                                     }
                                     AssociatedTypes::Argument(type_matcher) => {
                                       let type_ident = &type_matcher.ident;
-                                      let type_ident_str = type_ident.to_string();
+                                      let type_ident_str =
+                                        type_ident.to_string();
                                       nested_arg_checks.push(quote! {
                                         if
                                           let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
@@ -579,16 +657,34 @@ fn generate_path_matcher(
                           }
                         });
                       }
-                      GenericArgumentPattern::Binding(_span, name) => {
-                        arg_checks.push(quote! {
-                          if let Some(__arg) = __args.get(#arg_idx) {
-                            #name = Some(__arg);
-                          } else {
-                            break false;
-                          }
-                        });
+                      GenericArgumentPattern::Binding(
+                        _span,
+                        lifetime,
+                        name,
+                      ) => {
+                        if *lifetime {
+                          arg_checks.push(quote! {
+                            if let Some(syn::GenericArgument::Lifetime(__arg)) = __args.get(#arg_idx) {
+                              #name = Some(__arg);
+                            } else {
+                              break false;
+                            }
+                          });
+                        } else {
+                          arg_checks.push(quote! {
+                            if let Some(__arg) = __args.get(#arg_idx) {
+                              #name = Some(__arg);
+                            } else {
+                              break false;
+                            }
+                          });
+                        }
                       }
-                      GenericArgumentPattern::AssociatedType(_span, ident, value) => {
+                      GenericArgumentPattern::AssociatedType(
+                        _span,
+                        ident,
+                        value,
+                      ) => {
                         let ident_str = ident.to_string();
 
                         match value {
@@ -605,21 +701,38 @@ fn generate_path_matcher(
                               }
                             });
                           }
-                          AssociatedTypes::Binding(_, name) => {
-                            arg_checks.push(quote! {
-                              if
-                                let Some(__arg) = __args.get(#arg_idx)
-                                  && let syn::GenericArgument::AssocType(__assoc_type) = __arg
-                                  && __assoc_type.ident == #ident_str
-                              {
-                                #name = Some(&__assoc_type.ty);
-                              } else {
-                                break false;
-                              }
-                            });
+                          AssociatedTypes::Binding(_, lifetime, name) => {
+                            if *lifetime {
+                              arg_checks.push(quote! {
+                                if
+                                  let Some(__arg) = __args.get(#arg_idx)
+                                    && let syn::GenericArgument::AssocType(__assoc_type) = __arg
+                                    && __assoc_type.ident == #ident_str
+                                    && let syn::Type::Path(__assoc_path) = &__assoc_type.ty
+                                    && let Some(__assoc_seg) = __assoc_path.path.segments.first()
+                                    && let syn::PathArguments::AngleBracketed(__assoc_angle_args) = &__assoc_seg.arguments
+                                    && let Some(syn::GenericArgument::Lifetime(__lt)) = __assoc_angle_args.args.first()
+                                {
+                                  #name = Some(__lt);
+                                } else {
+                                  break false;
+                                }
+                              });
+                            } else {
+                              arg_checks.push(quote! {
+                                if
+                                  let Some(__arg) = __args.get(#arg_idx)
+                                    && let syn::GenericArgument::AssocType(__assoc_type) = __arg
+                                    && __assoc_type.ident == #ident_str
+                                {
+                                  #name = Some(&__assoc_type.ty);
+                                } else {
+                                  break false;
+                                }
+                              });
+                            }
                           }
                           AssociatedTypes::Argument(type_matcher) => {
-                            // For type argument matching, we need to check both the ident and the type
                             let type_ident = &type_matcher.ident;
                             let type_ident_str = type_ident.to_string();
 
@@ -804,10 +917,10 @@ pub fn path_match(input: TokenStream) -> TokenStream {
     |(path_expr, fq_check, len_check, seg_checks, binding_names, body)| {
       let spanless_binding_names = binding_names
         .iter()
-        .map(|(_, name)| name.clone())
+        .map(|(_, _, name)| name.clone())
         .collect::<Vec<_>>();
       let binding_extractions =
-        binding_names.into_iter().map(|(span, name)| {
+        binding_names.into_iter().map(|(span, _lifetime, name)| {
           let mut name_in_some = name.clone();
           name_in_some.set_span(span);
 

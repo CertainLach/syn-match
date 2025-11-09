@@ -32,17 +32,17 @@ fn test_optional_segments() {
 
 #[test]
 fn test_single_binding() {
-  let path: syn::Path = syn::parse_quote!(std::str::String);
+  let path: syn::Path = syn::parse_quote!(std::str);
   let result = path_match!(
     &path,
     std::str::String => "String".to_string(),
-    std::str::$rest+ => {
+    std::str::$rest* => {
       rest.iter().map(|seg| seg.ident.to_string()).collect::<String>()
     },
     _ => "no match".to_string(),
   );
 
-  assert_eq!(result, "String");
+  assert_eq!(result, "");
 }
 
 #[test]
@@ -92,7 +92,7 @@ fn test_multi_binding_at_start() {
 
   let result = path_match!(
     &path,
-    $prefix+::HashMap => {
+    $prefix*::HashMap => {
       prefix.iter()
         .map(|seg| seg.ident.to_string())
         .collect::<Vec<_>>()
@@ -110,7 +110,7 @@ fn test_multi_binding_at_start_single_segment() {
 
   let result = path_match!(
     &path,
-    $prefix+::String => {
+    $prefix*::String => {
       prefix.iter()
         .map(|seg| seg.ident.to_string())
         .collect::<Vec<_>>()
@@ -128,7 +128,7 @@ fn test_multi_binding_at_start_multiple_after() {
 
   let result = path_match!(
     &path,
-    $prefix+::hash::HashMap => {
+    $prefix*::hash::HashMap => {
       prefix.iter()
         .map(|seg| seg.ident.to_string())
         .collect::<Vec<_>>()
@@ -198,9 +198,26 @@ fn test_result_generic_bindings() {
 }
 
 #[test]
-fn test_type_assignment() {
+fn test_result_generic_bindings_mutliple_branch_with_wildcard() {
+  let path: syn::Path = syn::parse_quote!(Result<String, Error>);
+
+  let result = path_match!(
+    &path,
+    $_package*::Result<$ok> | $_package*::Result<$ok, _> => {
+      format!("Result<{}, ?>",
+        if let syn::GenericArgument::Type(syn::Type::Path(p)) = ok { p.path.segments.last().unwrap().ident.to_string() } else { "?".to_string() },
+      )
+    },
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "Result<String, ?>");
+}
+
+#[test]
+fn test_associated_type() {
   let path: syn::Path = syn::parse_quote!(Future<Output = String>);
-  
+
   let result = path_match!(
     &path,
     Future<Output = $output> => {
@@ -217,7 +234,7 @@ fn test_type_assignment() {
 }
 
 #[test]
-fn test_type_assignment_mismatch() {
+fn test_associated_type_mismatch() {
   let path: syn::Path = syn::parse_quote!(Future<Input = String>);
 
   let result = path_match!(
@@ -236,7 +253,7 @@ fn test_type_assignment_mismatch() {
 }
 
 #[test]
-fn test_type_assignment_wildcard() {
+fn test_associated_type_wildcard() {
   let path: syn::Path = syn::parse_quote!(Future<Output = String>);
 
   let result = path_match!(
@@ -249,7 +266,7 @@ fn test_type_assignment_wildcard() {
 }
 
 #[test]
-fn test_type_assignment_specific_type() {
+fn test_associated_type_specific_type() {
   let path: syn::Path = syn::parse_quote!(Future<Output = String>);
 
   let result = path_match!(
@@ -260,4 +277,47 @@ fn test_type_assignment_specific_type() {
   );
 
   assert_eq!(result, "matched specific type");
+}
+
+#[test]
+fn test_type_param_with_lifetime() {
+  let path: syn::Path = syn::parse_quote!(std::borrow::Cow<foo, str>);
+
+  let result = path_match!(
+    &path,
+    std?::borrow?::Cow<_, str> => "matched",
+    _ => "no match",
+  );
+
+  assert_eq!(result, "matched");
+}
+
+#[test]
+fn test_lifetime_binding_simple() {
+  let path: syn::Path = syn::parse_quote!(Cow<'static, str>);
+  let result = path_match!(
+    &path,
+    Cow<$'lt, str> => format!("lifetime: {}", lt.ident),
+    _ => "no match".to_string(),
+  );
+  assert_eq!(result, "lifetime: static");
+}
+
+#[test]
+fn test_lifetime_vs_type_binding() {
+  let path: syn::Path = syn::parse_quote!(Foo<'a, String>);
+  let result = path_match!(
+    &path,
+    Foo<$'lifetime, $ty> => {
+      let lifetime_str = lifetime.ident.to_string();
+      let type_str = if let syn::GenericArgument::Type(syn::Type::Path(type_path)) = ty {
+        type_path.path.segments.last().unwrap().ident.to_string()
+      } else {
+        "not_a_path".to_string()
+      };
+      format!("lifetime: {}, type: {}", lifetime_str, type_str)
+    },
+    _ => "no match".to_string(),
+  );
+  assert_eq!(result, "lifetime: a, type: String");
 }
