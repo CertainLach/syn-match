@@ -9,6 +9,16 @@ fn test_simple_path() {
 }
 
 #[test]
+fn test_simple_path_short() {
+  let path: syn::Path = syn::parse_quote!(str);
+  let result = path_match!(&path,
+    std?::str?::str => "we got full",
+    _ => "no",
+  );
+  assert_eq!(result, "we got full");
+}
+
+#[test]
 fn test_fully_qualified() {
   let path: syn::Path = syn::parse_quote!(::std::string::String);
   let result =
@@ -640,4 +650,27 @@ fn test_optional_binding_with_extraction() {
     _ => "no match".to_string(),
   );
   assert_eq!(result2, "No middle segment");
+}
+
+#[test]
+fn test_optional_conflict_with_normal_binding() {
+  let path: syn::Path = syn::parse_quote!(str);
+  let result = path_match!(
+    &path,
+    std?::$name => {
+      format!("captured: {}", name.ident)
+    },
+    _ => "no match".to_string(),
+  );
+  assert_eq!(result, "captured: str");
+
+  let path2: syn::Path = syn::parse_quote!(std::String);
+  let result2 = path_match!(
+    &path2,
+    std?::$name => {
+      format!("captured: {}", name.ident)
+    },
+    _ => "no match".to_string(),
+  );
+  assert_eq!(result2, "captured: String");
 }

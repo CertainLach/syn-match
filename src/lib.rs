@@ -1,7 +1,7 @@
 extern crate proc_macro;
 
-use proc_macro2::TokenStream;
 use proc_macro2::Span;
+use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Expr;
 use syn::Ident;
@@ -202,27 +202,18 @@ fn parse_generic_binding(input: ParseStream) -> Result<(Span, bool, Ident)> {
 
 #[derive(Clone)]
 enum GenericArgCheck {
-  /// Check if argument is a lifetime
   Lifetime,
-  /// Check if argument is a specific path type
   PathType,
-  /// Check if argument is an associated type with specific ident
   AssocType(String),
-  /// Check if argument matches any type
   Any,
 }
 
 #[derive(Clone)]
 enum BindingAction {
-  /// Bind to the entire argument
   BindArg(Ident),
-  /// Bind to a lifetime within the argument
   BindLifetime(Ident),
-  /// Bind to the type within an associated type
   BindAssocType(Ident),
-  /// Bind to the path within a path type
   BindPath(Ident),
-  /// No binding
   None,
 }
 
@@ -232,7 +223,6 @@ fn generate_generic_arg_check(
   arg_idx: usize,
   args_var: &str,
 ) -> TokenStream {
-
   match check {
     GenericArgCheck::Lifetime => {
       match action {
@@ -245,7 +235,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         BindingAction::None => {
           let args_ident = Ident::new(args_var, Span::call_site());
           quote! {
@@ -255,7 +245,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         _ => unreachable!("Invalid binding action for lifetime check"),
       }
     }
@@ -270,7 +260,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         BindingAction::BindPath(name) => {
           let args_ident = Ident::new(args_var, Span::call_site());
           quote! {
@@ -280,7 +270,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         BindingAction::None => {
           let args_ident = Ident::new(args_var, Span::call_site());
           quote! {
@@ -290,7 +280,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         _ => unreachable!("Invalid binding action for path type check"),
       }
     }
@@ -307,7 +297,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         BindingAction::BindLifetime(name) => {
           let args_ident = Ident::new(args_var, Span::call_site());
           quote! {
@@ -323,7 +313,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         BindingAction::None => {
           let args_ident = Ident::new(args_var, Span::call_site());
           quote! {
@@ -335,7 +325,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         _ => unreachable!("Invalid binding action for associated type check"),
       }
     }
@@ -350,7 +340,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         BindingAction::None => {
           let args_ident = Ident::new(args_var, Span::call_site());
           quote! {
@@ -360,7 +350,7 @@ fn generate_generic_arg_check(
               break false;
             }
           }
-        },
+        }
         _ => unreachable!("Invalid binding action for any check"),
       }
     }
@@ -376,14 +366,17 @@ fn generate_wildcard_check(
       &GenericArgCheck::Lifetime,
       &BindingAction::None,
       arg_idx,
-      "__args"
+      "__args",
     ))
   } else {
     None
   }
 }
 
-fn parse_path_pattern_in_generic(input: ParseStream, first_ident: Ident) -> Result<Vec<SegmentPattern>> {
+fn parse_path_pattern_in_generic(
+  input: ParseStream,
+  first_ident: Ident,
+) -> Result<Vec<SegmentPattern>> {
   let mut path_segments = Vec::new();
   path_segments.push(SegmentPattern::Required(SegmentMatcher {
     ident: first_ident,
@@ -414,7 +407,8 @@ fn parse_path_pattern_in_generic(input: ParseStream, first_ident: Ident) -> Resu
         None
       };
 
-      path_segments.push(SegmentPattern::Required(SegmentMatcher { ident, args }));
+      path_segments
+        .push(SegmentPattern::Required(SegmentMatcher { ident, args }));
 
       if input.peek(Token![::]) {
         input.parse::<Token![::]>()?;
@@ -551,7 +545,8 @@ impl Parse for ArgumentPatterns {
           args.push(GenericArgumentPattern::PathPattern(path_segments));
         } else {
           let first_ident: Ident = input.parse()?;
-          let path_segments = parse_path_pattern_in_generic(input, first_ident)?;
+          let path_segments =
+            parse_path_pattern_in_generic(input, first_ident)?;
           args.push(GenericArgumentPattern::PathPattern(path_segments));
         }
       } else {
@@ -591,7 +586,8 @@ impl Parse for ArgumentPatterns {
           // path
           input.parse::<Token![::]>()?;
 
-          let path_segments = parse_path_pattern_in_generic(input, first_ident.clone())?;
+          let path_segments =
+            parse_path_pattern_in_generic(input, first_ident.clone())?;
           args.push(GenericArgumentPattern::PathPattern(path_segments));
         } else {
           let matcher = SegmentMatcher {
@@ -620,7 +616,7 @@ impl Parse for ArgumentPatterns {
 
 struct PathMatcher {
   path_expr: Expr,
-  fully_qualified_check: TokenStream,
+  fully_qualified_check: Option<TokenStream>,
   length_check: TokenStream,
   segment_checks: Vec<TokenStream>,
   binding_names: Vec<(Span, bool, Ident, SegmentPatternBindingMode)>,
@@ -649,7 +645,7 @@ fn generate_path_matcher(
               mode,
             } => {
               binding_names.push((
-                span.clone(),
+                *span,
                 *lifetime,
                 name.clone(),
                 mode.clone(),
@@ -671,27 +667,27 @@ fn generate_path_matcher(
                     match arg {
                       GenericArgumentPattern::Binding(span, lifetime, name) => {
                         binding_names.push((
-                          span.clone(),
+                          *span,
                           *lifetime,
                           name.clone(),
                           SegmentPatternBindingMode::Normal,
                         ));
                       }
                       GenericArgumentPattern::Argument(arg) => {
-                        handle_segment_matcher(binding_names, &*arg);
+                        handle_segment_matcher(binding_names, arg);
                       }
                       GenericArgumentPattern::AssociatedType(_, _, value) => {
                         match value {
                           AssociatedTypes::Binding(span, lifetime, name) => {
                             binding_names.push((
-                              span.clone(),
+                              *span,
                               *lifetime,
                               name.clone(),
                               SegmentPatternBindingMode::Normal,
                             ));
                           }
                           AssociatedTypes::Argument(arg) => {
-                            handle_segment_matcher(binding_names, &*arg);
+                            handle_segment_matcher(binding_names, arg);
                           }
                           AssociatedTypes::Wildcard => {}
                         }
@@ -707,7 +703,7 @@ fn generate_path_matcher(
                               mode,
                             } => {
                               binding_names.push((
-                                span.clone(),
+                                *span,
                                 *lifetime,
                                 name.clone(),
                                 mode.clone(),
@@ -769,13 +765,22 @@ fn generate_path_matcher(
 
         let mut segment_checks = Vec::new();
 
+        let mut required_segment_names = std::collections::HashSet::new();
+
+        for seg in segments.iter() {
+          if let SegmentPattern::Required(matcher) = seg {
+            required_segment_names.insert(matcher.ident.to_string());
+          }
+        }
+
         for (seg_idx, seg) in segments.iter().enumerate() {
           match seg {
             SegmentPattern::Binding { name, mode, .. } => {
               match mode {
                 SegmentPatternBindingMode::Multi => {
-                  let required_after = segments[seg_idx + 1..]
+                  let required_after = segments
                     .iter()
+                    .skip(seg_idx)
                     .filter(|s| {
                       matches!(
                         s,
@@ -809,8 +814,9 @@ fn generate_path_matcher(
                   segment_checks.push(check);
                 }
                 SegmentPatternBindingMode::Optional => {
-                  let required_after = segments[seg_idx + 1..]
+                  let required_after = segments
                     .iter()
+                    .skip(seg_idx)
                     .filter(|s| {
                       matches!(
                         s,
@@ -849,6 +855,8 @@ fn generate_path_matcher(
           fn handle_segment_matcher(
             matcher: &SegmentMatcher,
             is_optional: bool,
+            required_names: &std::collections::HashSet<String>,
+            segments_after_current: &[SegmentPattern],
           ) -> TokenStream {
             let seg_ident = &matcher.ident;
             let seg_ident_str = seg_ident.to_string();
@@ -864,7 +872,9 @@ fn generate_path_matcher(
               for (arg_idx, arg_pattern) in arg_patterns.iter().enumerate() {
                 match arg_pattern {
                   GenericArgumentPattern::Wildcard(lifetime) => {
-                    if let Some(check) = generate_wildcard_check(*lifetime, arg_idx) {
+                    if let Some(check) =
+                      generate_wildcard_check(*lifetime, arg_idx)
+                    {
                       arg_checks.push(check);
                     }
                   }
@@ -892,11 +902,21 @@ fn generate_path_matcher(
                               lifetime,
                               name,
                             ) => {
-                              let check = if *lifetime { GenericArgCheck::Lifetime } else { GenericArgCheck::Any };
+                              let check = if *lifetime {
+                                GenericArgCheck::Lifetime
+                              } else {
+                                GenericArgCheck::Any
+                              };
                               let action = BindingAction::BindArg(name.clone());
 
-                              // Generate the unified check for nested context
-                              nested_arg_checks.push(generate_generic_arg_check(&check, &action, nested_arg_idx, "__nested_args"));
+                              nested_arg_checks.push(
+                                generate_generic_arg_check(
+                                  &check,
+                                  &action,
+                                  nested_arg_idx,
+                                  "__nested_args",
+                                ),
+                              );
                             }
                             GenericArgumentPattern::Wildcard(_) => {}
                             GenericArgumentPattern::Argument(
@@ -925,10 +945,13 @@ fn generate_path_matcher(
                               value,
                             ) => {
                               let ident_str = ident.to_string();
-                              let check = GenericArgCheck::AssocType(ident_str.clone());
+                              let check =
+                                GenericArgCheck::AssocType(ident_str.clone());
 
                               let action = match value {
-                                AssociatedTypes::Wildcard => BindingAction::None,
+                                AssociatedTypes::Wildcard => {
+                                  BindingAction::None
+                                }
                                 AssociatedTypes::Binding(_, lifetime, name) => {
                                   if *lifetime {
                                     BindingAction::BindLifetime(name.clone())
@@ -937,18 +960,36 @@ fn generate_path_matcher(
                                   }
                                 }
                                 AssociatedTypes::Argument(_type_matcher) => {
-                                  // For now, just check the associated type exists
                                   BindingAction::None
                                 }
                               };
 
-                              // Generate the unified check for nested context
-                              nested_arg_checks.push(generate_generic_arg_check(&check, &action, nested_arg_idx, "__nested_args"));
+                              nested_arg_checks.push(
+                                generate_generic_arg_check(
+                                  &check,
+                                  &action,
+                                  nested_arg_idx,
+                                  "__nested_args",
+                                ),
+                              );
                             }
-                            GenericArgumentPattern::PathPattern(path_segments) => {
-                              if path_segments.len() == 1 && let SegmentPattern::Binding { name, .. } = &path_segments[0] {
-                                let action = BindingAction::BindPath(name.clone());
-                                nested_arg_checks.push(generate_generic_arg_check(&GenericArgCheck::PathType, &action, nested_arg_idx, "__nested_args"));
+                            GenericArgumentPattern::PathPattern(
+                              path_segments,
+                            ) => {
+                              if path_segments.len() == 1
+                                && let SegmentPattern::Binding { name, .. } =
+                                  &path_segments[0]
+                              {
+                                let action =
+                                  BindingAction::BindPath(name.clone());
+                                nested_arg_checks.push(
+                                  generate_generic_arg_check(
+                                    &GenericArgCheck::PathType,
+                                    &action,
+                                    nested_arg_idx,
+                                    "__nested_args",
+                                  ),
+                                );
                               } else {
                                 // TODO: Handle complex path patterns in nested generics
                               }
@@ -960,20 +1001,15 @@ fn generate_path_matcher(
                         if arg_ident_str == "__slice__" {
                           let slice_checks = nested_arg_patterns
                             .iter()
-                            .enumerate()
-                            .map(|(_idx, pattern)| match pattern {
+                            .filter_map(|pattern| match pattern {
                               GenericArgumentPattern::Binding(
                                 _span,
                                 _lifetime,
                                 name,
-                              ) => {
-                                quote! {
-                                  #name = Some(__slice_type.elem.as_ref());
-                                }
-                              }
-                              _ => {
-                                quote!()
-                              }
+                              ) => Some(quote! {
+                                #name = Some(__slice_type.elem.as_ref());
+                              }),
+                              _ => None,
                             });
                           quote! {
                             if let syn::GenericArgument::Type(syn::Type::Slice(__slice_type)) = #arg_var_ident {
@@ -1000,26 +1036,24 @@ fn generate_path_matcher(
                             }
                           }
                         }
-                      } else {
-                        if arg_ident_str == "__slice__" {
-                          quote! {
-                            if let syn::GenericArgument::Type(syn::Type::Slice(__slice_type)) = #arg_var_ident {
-                              //
-                            } else {
-                              break false;
-                            }
+                      } else if arg_ident_str == "__slice__" {
+                        quote! {
+                          if let syn::GenericArgument::Type(syn::Type::Slice(__slice_type)) = #arg_var_ident {
+                            //
+                          } else {
+                            break false;
                           }
-                        } else {
-                          quote! {
-                            if
-                              let syn::GenericArgument::Type(syn::Type::Path(__nested_type_path)) = #arg_var_ident
-                                && let Some(__nested_seg) = __nested_type_path.path.segments.last()
-                                && __nested_seg.ident == #arg_ident_str
-                            {
-                              //
-                            } else {
-                              break false;
-                            }
+                        }
+                      } else {
+                        quote! {
+                          if
+                            let syn::GenericArgument::Type(syn::Type::Path(__nested_type_path)) = #arg_var_ident
+                              && let Some(__nested_seg) = __nested_type_path.path.segments.last()
+                              && __nested_seg.ident == #arg_ident_str
+                          {
+                            //
+                          } else {
+                            break false;
                           }
                         }
                       }
@@ -1037,9 +1071,15 @@ fn generate_path_matcher(
                     });
                   }
                   GenericArgumentPattern::Binding(_, lifetime, name) => {
-                    let check = if *lifetime { GenericArgCheck::Lifetime } else { GenericArgCheck::Any };
+                    let check = if *lifetime {
+                      GenericArgCheck::Lifetime
+                    } else {
+                      GenericArgCheck::Any
+                    };
                     let action = BindingAction::BindArg(name.clone());
-                    arg_checks.push(generate_generic_arg_check(&check, &action, arg_idx, "__args"));
+                    arg_checks.push(generate_generic_arg_check(
+                      &check, &action, arg_idx, "__args",
+                    ));
                   }
                   GenericArgumentPattern::AssociatedType(
                     _span,
@@ -1065,69 +1105,76 @@ fn generate_path_matcher(
                       }
                     };
 
-                    arg_checks.push(generate_generic_arg_check(&check, &action, arg_idx, "__args"));
+                    arg_checks.push(generate_generic_arg_check(
+                      &check, &action, arg_idx, "__args",
+                    ));
                   }
                   GenericArgumentPattern::PathPattern(path_segments) => {
-                    if path_segments.len() == 1 &&  let SegmentPattern::Binding { name, .. } = &path_segments[0]  {
+                    if path_segments.len() == 1
+                      && let SegmentPattern::Binding { name, .. } =
+                        &path_segments[0]
+                    {
                       let action = BindingAction::BindPath(name.clone());
-                      arg_checks.push(generate_generic_arg_check(&GenericArgCheck::PathType, &action, arg_idx, "__args"));
+                      arg_checks.push(generate_generic_arg_check(
+                        &GenericArgCheck::PathType,
+                        &action,
+                        arg_idx,
+                        "__args",
+                      ));
                     } else {
-                      let path_checks: Vec<_> = path_segments.iter().map(|seg| {
+                      let path_checks: Vec<_> = path_segments.iter().filter_map(|seg| {
                         match seg {
                           SegmentPattern::Required(matcher) => {
                             let ident = &matcher.ident;
                             let ident_str = ident.to_string();
-                            quote! {
-        if __path_seg_idx >= __path_segments.len() {
-          __path_matched = false;
-          break;
-        }
-        if __path_segments[__path_seg_idx].ident != #ident_str {
-          __path_matched = false;
-          break;
-        }
-        __path_seg_idx += 1;
-      }
+                            Some(quote! {
+                              if __path_seg_idx >= __path_segments.len() {
+                                break false;
+                              }
+                              if __path_segments[__path_seg_idx].ident != #ident_str {
+                                break false;
+                              }
+                              __path_seg_idx += 1;
+                            })
                           }
                           SegmentPattern::Binding { name, .. } => {
-                            quote! {
-        if __path_seg_idx >= __path_segments.len() {
-          __path_matched = false;
-          break;
-        }
-        #name = Some(&__path_segments[__path_seg_idx]);
-        __path_seg_idx += 1;
-      }
+                            Some(quote! {
+                              if __path_seg_idx >= __path_segments.len() {
+                                break false;
+                              }
+                              #name = Some(&__path_segments[__path_seg_idx]);
+                              __path_seg_idx += 1;
+                            })
                           }
-                          _ => quote!(), // TODO: Handle other segment patterns
+                          _ => None, // TODO: Handle other segment patterns
                         }
                       }).collect();
 
                       arg_checks.push(quote! {
-    if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
-      let __path_segments = &__type_path.path.segments;
-      let mut __path_seg_idx = 0;
-      let mut __path_matched = true;
+                        if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
+                          let __path_segments = &__type_path.path.segments;
+                          let mut __path_seg_idx = 0;
+                          let mut __path_matched = true;
 
-      loop {
-        #(#path_checks)*
-        break;
-      }
+                          __path_matched = loop {
+                            #(#path_checks)*
+                            break __path_matched;
+                          };
 
-      if !__path_matched || __path_seg_idx != __path_segments.len() {
-        break false;
-      }
-    } else {
-      break false;
-    }
-  });
+                          if !__path_matched || __path_seg_idx != __path_segments.len() {
+                            break false;
+                          }
+                        } else {
+                          break false;
+                        }
+                      });
                     }
                   }
                 }
               }
 
               let arg_count = arg_patterns.len();
-              quote! {
+              Some(quote! {
                 if let syn::PathArguments::AngleBracketed(__angle_args) = &__seg.arguments {
                   let __args = &__angle_args.args;
                   if __args.len() != #arg_count {
@@ -1137,18 +1184,50 @@ fn generate_path_matcher(
                 } else {
                   break false;
                 }
-              }
+              })
             } else {
-              quote!()
+              None
             };
 
-            let check = if is_optional {
-              quote! {
-                if __idx < __segments.len() {
-                  let __seg = &__segments[__idx];
-                  if #name_check {
-                    #args_check
-                    __idx += 1;
+            if is_optional {
+              let seg_name = seg_ident_str.clone();
+              let has_named_conflict = required_names.contains(&seg_name);
+
+              let remaining_required = segments_after_current
+                .iter()
+                .filter(|s| {
+                  matches!(
+                    s,
+                    SegmentPattern::Required(_)
+                      | SegmentPattern::Binding {
+                        mode: SegmentPatternBindingMode::Normal,
+                        ..
+                      }
+                  )
+                })
+                .count();
+
+              if has_named_conflict || remaining_required > 0 {
+                quote! {
+                  let __remaining_segments = __segments.len() - __idx;
+                  let __remaining_required = #remaining_required;
+
+                  if __remaining_segments > __remaining_required && __idx < __segments.len() {
+                    let __seg = &__segments[__idx];
+                    if #name_check {
+                      #args_check
+                      __idx += 1;
+                    }
+                  }
+                }
+              } else {
+                quote! {
+                  if __idx < __segments.len() {
+                    let __seg = &__segments[__idx];
+                    if #name_check {
+                      #args_check
+                      __idx += 1;
+                    }
                   }
                 }
               }
@@ -1164,22 +1243,25 @@ fn generate_path_matcher(
                 #args_check
                 __idx += 1;
               }
-            };
-
-            check
+            }
           }
 
-          segment_checks.push(handle_segment_matcher(matcher, is_optional));
+          segment_checks.push(handle_segment_matcher(
+            matcher,
+            is_optional,
+            &required_segment_names,
+            &segments[seg_idx + 1..],
+          ));
         }
 
         let fully_qualified_check = if *fully_qualified {
-          quote! {
+          Some(quote! {
             if !__path.leading_colon.is_some() {
               __matched = false;
             }
-          }
+          })
         } else {
-          quote!()
+          None
         };
 
         let length_check = match max_len {
@@ -1324,7 +1406,7 @@ pub fn path_match(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
           }
 
           if __matched {
-            __matched = loop {
+            __matched = 'outer: loop {
               #(#seg_checks)*
               break __matched;
             }
