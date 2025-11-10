@@ -1,4 +1,5 @@
 use syn_match::path_match;
+use quote::ToTokens;
 
 #[test]
 fn test_simple_path() {
@@ -31,7 +32,7 @@ fn test_optional_segments() {
 }
 
 #[test]
-fn test_single_binding() {
+fn test_wildcard_binding() {
   let path: syn::Path = syn::parse_quote!(std::str);
   let result = path_match!(
     &path,
@@ -43,6 +44,18 @@ fn test_single_binding() {
   );
 
   assert_eq!(result, "");
+}
+
+#[test]
+fn test_binding() {
+  let path: syn::Path = syn::parse_quote!(std::str::String);
+  let result = path_match!(
+    &path,
+    std::str::$foo => foo.ident.to_string(),
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "String");
 }
 
 #[test]
@@ -293,6 +306,52 @@ fn test_type_param_with_lifetime() {
 }
 
 #[test]
+fn test_type_param_slice() {
+  let path: syn::Path = syn::parse_quote!(std::borrow::Cow<foo, [u8]>);
+
+  let result = path_match!(
+    &path,
+    std?::borrow?::Cow<_, [u8]> => "matched",
+    _ => "no match",
+  );
+
+  assert_eq!(result, "matched");
+}
+
+
+#[test]
+fn test_type_param_slice_with_binding() {
+  let path: syn::Path = syn::parse_quote!(std::borrow::Cow<foo, [u8]>);
+
+  let result = path_match!(
+    &path,
+    std?::borrow?::Cow<_, [$foo]> => foo.to_token_stream().to_string(),
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "u8");
+}
+
+#[test]
+fn test_type_param_slice_with_complex_binding() {
+  let path: syn::Path = syn::parse_quote!(std::borrow::Cow<foo, [Vec<String>]>);
+
+  let result = path_match!(
+    &path,
+    std?::borrow?::Cow<_, [$elem_type]> => {
+      if let syn::Type::Path(type_path) = elem_type {
+        format!("slice of {}", type_path.path.segments.last().unwrap().ident)
+      } else {
+        "not a path type".to_string()
+      }
+    },
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "slice of Vec");
+}
+
+#[test]
 fn test_lifetime_binding_simple() {
   let path: syn::Path = syn::parse_quote!(Cow<'static, str>);
   let result = path_match!(
@@ -320,4 +379,113 @@ fn test_lifetime_vs_type_binding() {
     _ => "no match".to_string(),
   );
   assert_eq!(result, "lifetime: a, type: String");
+}
+
+#[test]
+fn test_lifetime_vs_type_binding_wild() {
+  // Test that lifetime bindings and type bindings work differently
+  let path: syn::Path = syn::parse_quote!(Foo<'a, String>);
+  let result = path_match!(
+    &path,
+    Foo<'_, $ty> => {
+      let type_str = if let syn::GenericArgument::Type(syn::Type::Path(type_path)) = ty {
+        type_path.path.segments.last().unwrap().ident.to_string()
+      } else {
+        "not_a_path".to_string()
+      };
+      format!("lifetime wildcard, type: {}", type_str)
+    },
+    _ => "no match".to_string(),
+  );
+  assert_eq!(result, "lifetime wildcard, type: String");
+}
+
+#[test]
+fn test_lifetime_wildcard_functionality() {
+  let path1: syn::Path = syn::parse_quote!(Cow<'static, str>);
+  let path2: syn::Path = syn::parse_quote!(Cow<'a, str>);
+  let path3: syn::Path = syn::parse_quote!(Cow<'_, str>);
+
+  for path in [&path1, &path2, &path3] {
+    let result = path_match!(
+      path,
+      Cow<'_, str> => "matched lifetime wildcard",
+      _ => "no match",
+    );
+    assert_eq!(result, "matched lifetime wildcard");
+  }
+
+  let path_with_type: syn::Path = syn::parse_quote!(Cow<String, str>);
+  let result = path_match!(
+    &path_with_type,
+    Cow<'_, str> => "matched",
+    _ => "no match",
+  );
+  assert_eq!(result, "no match");
+}
+
+#[test]
+fn test_optional_binding() {
+  // Test optional binding with present segment
+  let path: syn::Path = syn::parse_quote!(std::str::bar);
+  let result = path_match!(
+    &path,
+    std::str::$any? => {
+      if any.is_some() {
+        "matched with segment"
+      } else {
+        "matched without segment"
+      }
+    },
+    _ => "no match",
+  );
+  assert_eq!(result, "matched with segment");
+
+  // Test optional binding with missing segment
+  let path2: syn::Path = syn::parse_quote!(std::str);
+  let result2 = path_match!(
+    &path2,
+    std::str::$any? => {
+      if any.is_some() {
+        "matched with segment"
+      } else {
+        "matched without segment"
+      }
+    },
+    _ => "no match",
+  );
+  assert_eq!(result2, "matched without segment");
+}
+
+#[test]
+fn test_optional_binding_with_extraction() {
+  // Test optional binding extracts the correct value
+  let path: syn::Path = syn::parse_quote!(std::collections::HashMap);
+  let result = path_match!(
+    &path,
+    std::$middle?::HashMap => {
+      if let Some(seg) = middle {
+        format!("Found middle: {}", seg.ident)
+      } else {
+        "No middle segment".to_string()
+      }
+    },
+    _ => "no match".to_string(),
+  );
+  assert_eq!(result, "Found middle: collections");
+
+  // Test with no middle segment
+  let path2: syn::Path = syn::parse_quote!(std::HashMap);
+  let result2 = path_match!(
+    &path2,
+    std::$middle?::HashMap => {
+      if let Some(seg) = middle {
+        format!("Found middle: {}", seg.ident)
+      } else {
+        "No middle segment".to_string()
+      }
+    },
+    _ => "no match".to_string(),
+  );
+  assert_eq!(result2, "No middle segment");
 }

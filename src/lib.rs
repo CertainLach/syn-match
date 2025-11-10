@@ -20,6 +20,13 @@ enum PathPattern {
   Wildcard,
 }
 
+#[derive(Clone)]
+enum SegmentPatternBindingMode {
+  Normal,
+  Multi,
+  Optional,
+}
+
 enum SegmentPattern {
   Required(SegmentMatcher),
   Optional(SegmentMatcher),
@@ -27,7 +34,7 @@ enum SegmentPattern {
     span: Span,
     lifetime: bool,
     name: Ident,
-    multi: bool,
+    mode: SegmentPatternBindingMode,
   },
 }
 
@@ -42,7 +49,7 @@ enum ArgumentPattern {
 
 enum GenericArgumentPattern {
   Argument(Box<SegmentMatcher>),
-  Wildcard,
+  Wildcard(bool),
   Binding(Span, bool, Ident),
   AssociatedType(Span, Ident, AssociatedTypes),
 }
@@ -65,6 +72,7 @@ struct MatchArm {
   _comma: Option<Token![,]>,
 }
 
+// macro body
 impl Parse for PathMatchArms {
   fn parse(input: ParseStream) -> Result<Self> {
     let path = input.parse()?;
@@ -79,6 +87,8 @@ impl Parse for PathMatchArms {
   }
 }
 
+// foo::bar | hello::world => {}
+// ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 impl Parse for MatchArm {
   fn parse(input: ParseStream) -> Result<Self> {
     let patterns = Punctuated::parse_separated_nonempty(input)?;
@@ -95,6 +105,8 @@ impl Parse for MatchArm {
   }
 }
 
+// foo::bar | hello::world => {}
+// ^^^^^^^^
 impl Parse for PathPattern {
   fn parse(input: ParseStream) -> Result<Self> {
     if input.peek(Token![_]) {
@@ -121,12 +133,16 @@ impl Parse for PathPattern {
           (false, input.parse()?)
         };
 
-        let multi = if input.peek(Token![*]) {
+        let mode = if input.peek(Token![*]) {
           input.parse::<Token![*]>()?;
-          true
+          SegmentPatternBindingMode::Multi
+        } else if input.peek(Token![?]) {
+          input.parse::<Token![?]>()?;
+          SegmentPatternBindingMode::Optional
         } else {
-          false
+          SegmentPatternBindingMode::Normal
         };
+
 
         let span = name.span();
         name.set_span(Span::call_site());
@@ -135,7 +151,7 @@ impl Parse for PathPattern {
           span,
           lifetime,
           name,
-          multi,
+          mode,
         });
 
         if input.peek(Token![::]) {
@@ -183,6 +199,8 @@ impl Parse for PathPattern {
   }
 }
 
+// foo::bar<baz> | hello::world => {}
+//         ^^^^^
 impl Parse for ArgumentPattern {
   fn parse(input: ParseStream) -> Result<Self> {
     input.parse::<Token![<]>()?;
@@ -191,7 +209,14 @@ impl Parse for ArgumentPattern {
     loop {
       if input.peek(Token![_]) {
         input.parse::<Token![_]>()?;
-        args.push(GenericArgumentPattern::Wildcard);
+        args.push(GenericArgumentPattern::Wildcard(false));
+      } else if input.peek(syn::Lifetime) {
+        let lt: syn::Lifetime = input.parse()?;
+        if lt.ident == "_" {
+          args.push(GenericArgumentPattern::Wildcard(true));
+        } else {
+          return Err(syn::Error::new(lt.span(), "expected '_ for lifetime wildcard"));
+        }
       } else if input.peek(Token![$]) {
         input.parse::<Token![$]>()?;
 
@@ -206,6 +231,38 @@ impl Parse for ArgumentPattern {
         name.set_span(Span::call_site());
 
         args.push(GenericArgumentPattern::Binding(span, lifetime, name));
+      } else if input.peek(syn::token::Bracket) {
+        let content;
+        syn::bracketed!(content in input);
+
+        let slice_ident = Ident::new("__slice__", input.span());
+        let mut element_args = Vec::new();
+
+        if content.peek(Token![$]) {
+          content.parse::<Token![$]>()?;
+          let (lifetime, mut name) = if content.peek(syn::Lifetime) {
+            let lt: syn::Lifetime = content.parse()?;
+            (true, lt.ident)
+          } else {
+            (false, content.parse()?)
+          };
+          let span = name.span();
+          name.set_span(Span::call_site());
+          element_args.push(GenericArgumentPattern::Binding(span, lifetime, name));
+        } else {
+          let element_ident: Ident = content.parse()?;
+          let element_matcher = SegmentMatcher {
+            ident: element_ident,
+            args: None,
+          };
+          element_args.push(GenericArgumentPattern::Argument(Box::new(element_matcher)));
+        }
+
+        let slice_matcher = SegmentMatcher {
+          ident: slice_ident,
+          args: Some(ArgumentPattern::AngleBracketed(element_args)),
+        };
+        args.push(GenericArgumentPattern::Argument(Box::new(slice_matcher)));
       } else {
         let ident: Ident = input.parse()?;
 
@@ -276,7 +333,7 @@ struct PathMatcher {
   fully_qualified_check: proc_macro2::TokenStream,
   length_check: proc_macro2::TokenStream,
   segment_checks: Vec<proc_macro2::TokenStream>,
-  binding_names: Vec<(Span, bool, Ident)>,
+  binding_names: Vec<(Span, bool, Ident, SegmentPatternBindingMode)>,
 }
 
 fn generate_path_matcher(
@@ -299,14 +356,14 @@ fn generate_path_matcher(
               span,
               lifetime,
               name,
-              ..
+              mode,
             } => {
-              binding_names.push((span.clone(), *lifetime, name.clone()));
+              binding_names.push((span.clone(), *lifetime, name.clone(), mode.clone()));
             }
             SegmentPattern::Required(matcher)
             | SegmentPattern::Optional(matcher) => {
               fn handle_segment_matcher(
-                binding_names: &mut Vec<(Span, bool, Ident)>,
+                binding_names: &mut Vec<(Span, bool, Ident, SegmentPatternBindingMode)>,
                 matcher: &SegmentMatcher,
               ) {
                 if let Some(ArgumentPattern::AngleBracketed(args)) =
@@ -319,6 +376,7 @@ fn generate_path_matcher(
                           span.clone(),
                           *lifetime,
                           name.clone(),
+                          SegmentPatternBindingMode::Normal,
                         ));
                       }
                       GenericArgumentPattern::Argument(arg) => {
@@ -331,6 +389,7 @@ fn generate_path_matcher(
                               span.clone(),
                               *lifetime,
                               name.clone(),
+                              SegmentPatternBindingMode::Normal,
                             ));
                           }
                           AssociatedTypes::Argument(arg) => {
@@ -339,7 +398,7 @@ fn generate_path_matcher(
                           AssociatedTypes::Wildcard => {}
                         }
                       }
-                      GenericArgumentPattern::Wildcard => {}
+                      GenericArgumentPattern::Wildcard(_) => {}
                     }
                   }
                 }
@@ -362,8 +421,8 @@ fn generate_path_matcher(
             SegmentPattern::Optional(matcher) => {
               optional_segments.push(matcher)
             }
-            SegmentPattern::Binding { multi, .. } => {
-              if *multi {
+            SegmentPattern::Binding { mode, .. } => {
+              if matches!(mode, SegmentPatternBindingMode::Multi) {
                 has_multi_binding = true;
               }
             }
@@ -376,7 +435,7 @@ fn generate_path_matcher(
             matches!(
               s,
               SegmentPattern::Required(_)
-                | SegmentPattern::Binding { multi: false, .. }
+                | SegmentPattern::Binding { mode: SegmentPatternBindingMode::Normal, .. }
             )
           })
           .count();
@@ -391,37 +450,63 @@ fn generate_path_matcher(
 
         for (seg_idx, seg) in segments.iter().enumerate() {
           match seg {
-            SegmentPattern::Binding { name, multi, .. } => {
-              if *multi {
-                let required_after = segments[seg_idx + 1..]
-                  .iter()
-                  .filter(|s| {
-                    matches!(
-                      s,
-                      SegmentPattern::Required(_)
-                        | SegmentPattern::Binding { multi: false, .. }
-                    )
-                  })
-                  .count();
+            SegmentPattern::Binding { name, mode, .. } => {
+              match mode {
+                SegmentPatternBindingMode::Multi => {
+                  let required_after = segments[seg_idx + 1..]
+                    .iter()
+                    .filter(|s| {
+                      matches!(
+                        s,
+                        SegmentPattern::Required(_)
+                          | SegmentPattern::Binding { mode: SegmentPatternBindingMode::Normal, .. }
+                      )
+                    })
+                    .count();
 
-                let check = quote! {
-                  let __end_idx = __segments.len() - #required_after;
-                  if __idx > __end_idx {
-                    break false;
-                  }
-                  #name = Some(__segments.iter().skip(__idx).take(__end_idx - __idx).cloned().collect::<syn::punctuated::Punctuated<_, syn::Token![::]>>());
-                  __idx = __end_idx;
-                };
-                segment_checks.push(check);
-              } else {
-                let check = quote! {
-                  if __idx >= __segments.len() {
-                    break false;
-                  }
-                  #name = Some(&__segments[__idx]);
-                  __idx += 1;
-                };
-                segment_checks.push(check);
+                  let check = quote! {
+                    let __end_idx = __segments.len() - #required_after;
+                    if __idx > __end_idx {
+                      break false;
+                    }
+                    #name = Some(__segments.iter().skip(__idx).take(__end_idx - __idx).cloned().collect::<syn::punctuated::Punctuated<_, syn::Token![::]>>());
+                    __idx = __end_idx;
+                  };
+                  segment_checks.push(check);
+                }
+                SegmentPatternBindingMode::Normal => {
+                  let check = quote! {
+                    if __idx >= __segments.len() {
+                      break false;
+                    }
+                    #name = Some(&__segments[__idx]);
+                    __idx += 1;
+                  };
+                  segment_checks.push(check);
+                }
+                SegmentPatternBindingMode::Optional => {
+                  let required_after = segments[seg_idx + 1..]
+                    .iter()
+                    .filter(|s| {
+                      matches!(
+                        s,
+                        SegmentPattern::Required(_)
+                          | SegmentPattern::Binding { mode: SegmentPatternBindingMode::Normal, .. }
+                      )
+                    })
+                    .count();
+
+                  let check = quote! {
+                    let __min_needed = __idx + #required_after;
+                    if __idx < __segments.len() && __segments.len() > __min_needed {
+                      #name = Some(&__segments[__idx]);
+                      __idx += 1;
+                    } else {
+                      #name = None;
+                    }
+                  };
+                  segment_checks.push(check);
+                }
               }
               continue;
             }
@@ -452,7 +537,16 @@ fn generate_path_matcher(
                   for (arg_idx, arg_pattern) in arg_patterns.iter().enumerate()
                   {
                     match arg_pattern {
-                      GenericArgumentPattern::Wildcard => {}
+                      GenericArgumentPattern::Wildcard(false) => {}
+                      GenericArgumentPattern::Wildcard(true) => {
+                        arg_checks.push(quote! {
+                          if let Some(syn::GenericArgument::Lifetime(_)) = __args.get(#arg_idx) {
+                            //
+                          } else {
+                            break false;
+                          }
+                        });
+                      }
                       GenericArgumentPattern::Argument(segment_matcher) => {
                         fn generate_nested_arg_check(
                           segment_matcher: &SegmentMatcher,
@@ -502,7 +596,7 @@ fn generate_path_matcher(
                                     });
                                   }
                                 }
-                                GenericArgumentPattern::Wildcard => {}
+                                GenericArgumentPattern::Wildcard(_) => {}
                                 GenericArgumentPattern::Argument(
                                   inner_segment_matcher,
                                 ) => {
@@ -612,32 +706,64 @@ fn generate_path_matcher(
                             }
 
                             let nested_arg_count = nested_arg_patterns.len();
-                            quote! {
-                              if
-                                let syn::GenericArgument::Type(syn::Type::Path(__nested_type_path)) = #arg_var_ident
-                                  && let Some(__nested_seg) = __nested_type_path.path.segments.last()
-                                  && __nested_seg.ident == #arg_ident_str
-                                  && let syn::PathArguments::AngleBracketed(__nested_angle_args) = &__nested_seg.arguments
-                              {
-                                let __nested_args = &__nested_angle_args.args;
-                                if __nested_args.len() != #nested_arg_count {
+                            if arg_ident_str == "__slice__" {
+                              let slice_checks = nested_arg_patterns.iter().enumerate().map(|(_idx, pattern)| {
+                                match pattern {
+                                  GenericArgumentPattern::Binding(_span, _lifetime, name) => {
+                                    quote! {
+                                      #name = Some(__slice_type.elem.as_ref());
+                                    }
+                                  }
+                                  _ => {
+                                    quote!()
+                                  }
+                                }
+                              });
+                              quote! {
+                                if let syn::GenericArgument::Type(syn::Type::Slice(__slice_type)) = #arg_var_ident {
+                                  #(#slice_checks)*
+                                } else {
                                   break false;
                                 }
-                                #(#nested_arg_checks)*
-                              } else {
-                                break false;
+                              }
+                            } else {
+                              quote! {
+                                if
+                                  let syn::GenericArgument::Type(syn::Type::Path(__nested_type_path)) = #arg_var_ident
+                                    && let Some(__nested_seg) = __nested_type_path.path.segments.last()
+                                    && __nested_seg.ident == #arg_ident_str
+                                    && let syn::PathArguments::AngleBracketed(__nested_angle_args) = &__nested_seg.arguments
+                                {
+                                  let __nested_args = &__nested_angle_args.args;
+                                  if __nested_args.len() != #nested_arg_count {
+                                    break false;
+                                  }
+                                  #(#nested_arg_checks)*
+                                } else {
+                                  break false;
+                                }
                               }
                             }
                           } else {
-                            quote! {
-                              if
-                                let syn::GenericArgument::Type(syn::Type::Path(__nested_type_path)) = #arg_var_ident
-                                  && let Some(__nested_seg) = __nested_type_path.path.segments.last()
-                                  && __nested_seg.ident == #arg_ident_str
-                              {
-                                //
-                              } else {
-                                break false;
+                            if arg_ident_str == "__slice__" {
+                              quote! {
+                                if let syn::GenericArgument::Type(syn::Type::Slice(__slice_type)) = #arg_var_ident {
+                                  //
+                                } else {
+                                  break false;
+                                }
+                              }
+                            } else {
+                              quote! {
+                                if
+                                  let syn::GenericArgument::Type(syn::Type::Path(__nested_type_path)) = #arg_var_ident
+                                    && let Some(__nested_seg) = __nested_type_path.path.segments.last()
+                                    && __nested_seg.ident == #arg_ident_str
+                                {
+                                  //
+                                } else {
+                                  break false;
+                                }
                               }
                             }
                           }
@@ -917,15 +1043,24 @@ pub fn path_match(input: TokenStream) -> TokenStream {
     |(path_expr, fq_check, len_check, seg_checks, binding_names, body)| {
       let spanless_binding_names = binding_names
         .iter()
-        .map(|(_, _, name)| name.clone())
+        .map(|(_, _, name, _)| name.clone())
         .collect::<Vec<_>>();
       let binding_extractions =
-        binding_names.into_iter().map(|(span, _lifetime, name)| {
+        binding_names.into_iter().map(|(span, _lifetime, name, mode)| {
           let mut name_in_some = name.clone();
           name_in_some.set_span(span);
 
-          quote! {
-            let #name_in_some = #name.unwrap();
+          match mode {
+            SegmentPatternBindingMode::Optional => {
+              quote! {
+                let #name_in_some = #name;
+              }
+            }
+            _ => {
+              quote! {
+                let #name_in_some = #name.unwrap();
+              }
+            }
           }
         });
 
