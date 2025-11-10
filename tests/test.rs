@@ -173,6 +173,36 @@ fn test_generic_binding() {
 }
 
 #[test]
+fn test_generic_binding_path() {
+  let path: syn::Path = syn::parse_quote!(Option<std::str::String>);
+
+  let result = path_match!(
+    &path,
+    Option<std::str::$inner> => {
+      inner.ident.to_string()
+    },
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "String");
+}
+
+#[test]
+fn test_generic_binding_path_multiple_segments() {
+  let path: syn::Path = syn::parse_quote!(Result<std::collections::HashMap, io::Error>);
+
+  let result = path_match!(
+    &path,
+    Result<std::$module::$ty, io::Error> => {
+      format!("{}::{}", module.ident, ty.ident)
+    },
+    _ => "no match".to_string(),
+  );
+
+  assert_eq!(result, "collections::HashMap");
+}
+
+#[test]
 fn test_generic_binding_nested() {
   let path: syn::Path =
     syn::parse_quote!(Option<Outer<Other<More<Yet<String>>>>>);
@@ -383,7 +413,6 @@ fn test_lifetime_vs_type_binding() {
 
 #[test]
 fn test_lifetime_vs_type_binding_wild() {
-  // Test that lifetime bindings and type bindings work differently
   let path: syn::Path = syn::parse_quote!(Foo<'a, String>);
   let result = path_match!(
     &path,
@@ -426,7 +455,6 @@ fn test_lifetime_wildcard_functionality() {
 
 #[test]
 fn test_optional_binding() {
-  // Test optional binding with present segment
   let path: syn::Path = syn::parse_quote!(std::str::bar);
   let result = path_match!(
     &path,
@@ -441,7 +469,6 @@ fn test_optional_binding() {
   );
   assert_eq!(result, "matched with segment");
 
-  // Test optional binding with missing segment
   let path2: syn::Path = syn::parse_quote!(std::str);
   let result2 = path_match!(
     &path2,
@@ -459,7 +486,6 @@ fn test_optional_binding() {
 
 #[test]
 fn test_optional_binding_with_extraction() {
-  // Test optional binding extracts the correct value
   let path: syn::Path = syn::parse_quote!(std::collections::HashMap);
   let result = path_match!(
     &path,
@@ -474,7 +500,6 @@ fn test_optional_binding_with_extraction() {
   );
   assert_eq!(result, "Found middle: collections");
 
-  // Test with no middle segment
   let path2: syn::Path = syn::parse_quote!(std::HashMap);
   let result2 = path_match!(
     &path2,
