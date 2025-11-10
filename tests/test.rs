@@ -1,5 +1,5 @@
-use syn_match::path_match;
 use quote::ToTokens;
+use syn_match::path_match;
 
 #[test]
 fn test_simple_path() {
@@ -189,7 +189,8 @@ fn test_generic_binding_path() {
 
 #[test]
 fn test_generic_binding_path_multiple_segments() {
-  let path: syn::Path = syn::parse_quote!(Result<std::collections::HashMap, io::Error>);
+  let path: syn::Path =
+    syn::parse_quote!(Result<std::collections::HashMap, io::Error>);
 
   let result = path_match!(
     &path,
@@ -205,7 +206,7 @@ fn test_generic_binding_path_multiple_segments() {
 #[test]
 fn test_path_coercion_binding() {
   let path: syn::Path = syn::parse_quote!(Vec<String>);
-  
+
   let result = path_match!(
     &path,
     Vec<::$ty> => {
@@ -213,14 +214,14 @@ fn test_path_coercion_binding() {
     },
     _ => "no match".to_string(),
   );
-  
+
   assert_eq!(result, "String");
 }
 
 #[test]
 fn test_path_coercion_no_match() {
   let path: syn::Path = syn::parse_quote!(Vec<123>);
-  
+
   let result = path_match!(
     &path,
     Vec<::$ty> => {
@@ -228,14 +229,14 @@ fn test_path_coercion_no_match() {
     },
     _ => "no match".to_string(),
   );
-  
+
   assert_eq!(result, "no match");
 }
 
 #[test]
 fn test_path_coercion_complex_path() {
   let path: syn::Path = syn::parse_quote!(Vec<std::collections::HashMap>);
-  
+
   let result = path_match!(
     &path,
     Vec<::$ty> => {
@@ -243,7 +244,7 @@ fn test_path_coercion_complex_path() {
     },
     _ => "no match".to_string(),
   );
-  
+
   assert_eq!(result, "3 segments");
 }
 
@@ -251,7 +252,7 @@ fn test_path_coercion_complex_path() {
 fn test_path_coercion_vs_regular_binding() {
   let path_with_string: syn::Path = syn::parse_quote!(Vec<String>);
   let path_with_number: syn::Path = syn::parse_quote!(Vec<[u8]>);
-  
+
   let result1 = path_match!(
     &path_with_string,
     Vec<$ty> => {
@@ -265,7 +266,7 @@ fn test_path_coercion_vs_regular_binding() {
     },
     _ => "no match".to_string(),
   );
-  
+
   let result2 = path_match!(
     &path_with_number,
     Vec<$ty> => {
@@ -279,7 +280,7 @@ fn test_path_coercion_vs_regular_binding() {
     },
     _ => "no match".to_string(),
   );
-  
+
   let result3 = path_match!(
     &path_with_string,
     Vec<::$ty> => {
@@ -287,7 +288,7 @@ fn test_path_coercion_vs_regular_binding() {
     },
     _ => "no match".to_string(),
   );
-  
+
   let result4 = path_match!(
     &path_with_number,
     Vec<::$ty> => {
@@ -295,17 +296,17 @@ fn test_path_coercion_vs_regular_binding() {
     },
     _ => "no match".to_string(),
   );
-  
+
   assert_eq!(result1, "path: String");
   assert_eq!(result2, "non-path type");
-  assert_eq!(result3, "path: String");  
-  assert_eq!(result4, "no match"); 
+  assert_eq!(result3, "path: String");
+  assert_eq!(result4, "no match");
 }
 
 #[test]
 fn test_path_coercion_with_path_prefix() {
   let path: syn::Path = syn::parse_quote!(std::vec::Vec<String>);
-  
+
   let result = path_match!(
     &path,
     std?::vec?::Vec<::$ty> => {
@@ -313,11 +314,11 @@ fn test_path_coercion_with_path_prefix() {
     },
     _ => "no match".to_string(),
   );
-  
+
   assert_eq!(result, "Found path type: String");
-  
+
   let path2: syn::Path = syn::parse_quote!(std::vec::Vec<[u8]>);
-  
+
   let result2 = path_match!(
     &path2,
     std?::vec?::Vec<::$ty> => {
@@ -325,7 +326,7 @@ fn test_path_coercion_with_path_prefix() {
     },
     _ => "no match".to_string(),
   );
-  
+
   assert_eq!(result2, "no match");
 }
 
@@ -474,7 +475,6 @@ fn test_type_param_slice() {
 
   assert_eq!(result, "matched");
 }
-
 
 #[test]
 fn test_type_param_slice_with_binding() {
