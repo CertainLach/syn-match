@@ -63,10 +63,7 @@ impl Parse for MatchArm {
 /// ^^^^^^^^^^^^^   ^^^^^^^^^^^^^
 /// ```
 enum PathPattern {
-  Path {
-    segments: Vec<SegmentPattern>,
-    fully_qualified: bool,
-  },
+  Path(Vec<SegmentPattern>),
   Wildcard,
 }
 
@@ -428,19 +425,7 @@ impl Parse for PathPattern {
       return Ok(PathPattern::Wildcard);
     }
 
-    let fully_qualified = if input.peek(Token![::]) {
-      input.parse::<Token![::]>()?;
-      true
-    } else {
-      false
-    };
-
-    let segments = parse_path_segments(input)?;
-
-    Ok(PathPattern::Path {
-      segments,
-      fully_qualified,
-    })
+    Ok(PathPattern::Path(parse_path_segments(input)?))
   }
 }
 
@@ -616,7 +601,6 @@ impl Parse for ArgumentPatterns {
 
 struct PathMatcher {
   path_expr: Expr,
-  fully_qualified_check: Option<TokenStream>,
   length_check: TokenStream,
   segment_checks: Vec<TokenStream>,
   binding_names: Vec<(Span, bool, Ident, SegmentPatternBindingMode)>,
@@ -631,10 +615,7 @@ fn generate_path_matcher(
   for pattern in patterns {
     match pattern {
       PathPattern::Wildcard => {}
-      PathPattern::Path {
-        segments,
-        fully_qualified,
-      } => {
+      PathPattern::Path(segments) => {
         let mut binding_names = Vec::new();
         for seg in segments {
           match seg {
@@ -1254,16 +1235,6 @@ fn generate_path_matcher(
           ));
         }
 
-        let fully_qualified_check = if *fully_qualified {
-          Some(quote! {
-            if !__path.leading_colon.is_some() {
-              __matched = false;
-            }
-          })
-        } else {
-          None
-        };
-
         let length_check = match max_len {
           Some(max) if min_len == max => {
             quote! {
@@ -1290,7 +1261,6 @@ fn generate_path_matcher(
 
         out.push(PathMatcher {
           path_expr: path_expr.clone(),
-          fully_qualified_check,
           length_check,
           segment_checks,
           binding_names,
@@ -1346,7 +1316,6 @@ pub fn path_match(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let path_matchers = generate_path_matcher(&path, &arm.patterns);
     for PathMatcher {
       path_expr,
-      fully_qualified_check,
       length_check,
       segment_checks,
       binding_names,
@@ -1354,7 +1323,6 @@ pub fn path_match(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     {
       match_checks.push((
         path_expr,
-        fully_qualified_check,
         length_check,
         segment_checks,
         binding_names,
@@ -1364,7 +1332,7 @@ pub fn path_match(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
   }
 
   let arms_code = match_checks.into_iter().map(
-    |(path_expr, fq_check, len_check, seg_checks, binding_names, body)| {
+    |(path_expr, len_check, seg_checks, binding_names, body)| {
       let spanless_binding_names = binding_names
         .iter()
         .map(|(_, _, name, _)| name.clone())
@@ -1398,8 +1366,6 @@ pub fn path_match(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
           let mut __matched = true;
 
           #(let mut #spanless_binding_names: Option<_> = None;)*
-
-          #fq_check
 
           if __matched {
             #len_check
