@@ -1,6 +1,6 @@
 [package]
 name = "syn-match"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "a macro for matching on syn paths"
 repository = "https://github.com/crowlKats/syn-match"
