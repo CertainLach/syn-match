@@ -203,6 +203,133 @@ fn test_generic_binding_path_multiple_segments() {
 }
 
 #[test]
+fn test_path_coercion_binding() {
+  let path: syn::Path = syn::parse_quote!(Vec<String>);
+  
+  let result = path_match!(
+    &path,
+    Vec<::$ty> => {
+      ty.segments.last().unwrap().ident.to_string()
+    },
+    _ => "no match".to_string(),
+  );
+  
+  assert_eq!(result, "String");
+}
+
+#[test]
+fn test_path_coercion_no_match() {
+  let path: syn::Path = syn::parse_quote!(Vec<123>);
+  
+  let result = path_match!(
+    &path,
+    Vec<::$ty> => {
+      ty.segments.last().unwrap().ident.to_string()
+    },
+    _ => "no match".to_string(),
+  );
+  
+  assert_eq!(result, "no match");
+}
+
+#[test]
+fn test_path_coercion_complex_path() {
+  let path: syn::Path = syn::parse_quote!(Vec<std::collections::HashMap>);
+  
+  let result = path_match!(
+    &path,
+    Vec<::$ty> => {
+      format!("{} segments", ty.segments.len())
+    },
+    _ => "no match".to_string(),
+  );
+  
+  assert_eq!(result, "3 segments");
+}
+
+#[test]
+fn test_path_coercion_vs_regular_binding() {
+  let path_with_string: syn::Path = syn::parse_quote!(Vec<String>);
+  let path_with_number: syn::Path = syn::parse_quote!(Vec<[u8]>);
+  
+  let result1 = path_match!(
+    &path_with_string,
+    Vec<$ty> => {
+      match ty {
+        syn::GenericArgument::Type(syn::Type::Path(p)) => {
+          format!("path: {}", p.path.segments.last().unwrap().ident)
+        }
+        syn::GenericArgument::Type(_) => "non-path type".to_string(),
+        _ => "other".to_string(),
+      }
+    },
+    _ => "no match".to_string(),
+  );
+  
+  let result2 = path_match!(
+    &path_with_number,
+    Vec<$ty> => {
+      match ty {
+        syn::GenericArgument::Type(syn::Type::Path(p)) => {
+          format!("path: {}", p.path.segments.last().unwrap().ident)
+        }
+        syn::GenericArgument::Type(_) => "non-path type".to_string(),
+        _ => "other".to_string(),
+      }
+    },
+    _ => "no match".to_string(),
+  );
+  
+  let result3 = path_match!(
+    &path_with_string,
+    Vec<::$ty> => {
+      format!("path: {}", ty.segments.last().unwrap().ident)
+    },
+    _ => "no match".to_string(),
+  );
+  
+  let result4 = path_match!(
+    &path_with_number,
+    Vec<::$ty> => {
+      format!("path: {}", ty.segments.last().unwrap().ident)
+    },
+    _ => "no match".to_string(),
+  );
+  
+  assert_eq!(result1, "path: String");
+  assert_eq!(result2, "non-path type");
+  assert_eq!(result3, "path: String");  
+  assert_eq!(result4, "no match"); 
+}
+
+#[test]
+fn test_path_coercion_with_path_prefix() {
+  let path: syn::Path = syn::parse_quote!(std::vec::Vec<String>);
+  
+  let result = path_match!(
+    &path,
+    std?::vec?::Vec<::$ty> => {
+      format!("Found path type: {}", ty.segments.last().unwrap().ident)
+    },
+    _ => "no match".to_string(),
+  );
+  
+  assert_eq!(result, "Found path type: String");
+  
+  let path2: syn::Path = syn::parse_quote!(std::vec::Vec<[u8]>);
+  
+  let result2 = path_match!(
+    &path2,
+    std?::vec?::Vec<::$ty> => {
+      format!("Found path type: {}", ty.segments.last().unwrap().ident)
+    },
+    _ => "no match".to_string(),
+  );
+  
+  assert_eq!(result2, "no match");
+}
+
+#[test]
 fn test_generic_binding_nested() {
   let path: syn::Path =
     syn::parse_quote!(Option<Outer<Other<More<Yet<String>>>>>);
