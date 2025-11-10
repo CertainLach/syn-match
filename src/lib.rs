@@ -1,6 +1,6 @@
 extern crate proc_macro;
 
-use proc_macro::TokenStream;
+use proc_macro2::TokenStream;
 use proc_macro2::Span;
 use quote::quote;
 use syn::Expr;
@@ -106,60 +106,140 @@ struct SegmentMatcher {
   args: Option<ArgumentPatterns>,
 }
 
-impl Parse for PathPattern {
-  fn parse(input: ParseStream) -> Result<Self> {
-    if input.peek(Token![_]) {
-      input.parse::<Token![_]>()?;
-      return Ok(PathPattern::Wildcard);
-    }
+impl SegmentPattern {
+  fn parse_binding(input: ParseStream) -> Result<Self> {
+    input.parse::<Token![$]>()?;
 
-    let mut segments = Vec::new();
-    let mut fully_qualified = false;
+    let (lifetime, mut name) = if input.peek(syn::Lifetime) {
+      let lt: syn::Lifetime = input.parse()?;
+      (true, lt.ident)
+    } else {
+      (false, input.parse()?)
+    };
+
+    let mode = if input.peek(Token![*]) {
+      input.parse::<Token![*]>()?;
+      SegmentPatternBindingMode::Multi
+    } else if input.peek(Token![?]) {
+      input.parse::<Token![?]>()?;
+      SegmentPatternBindingMode::Optional
+    } else {
+      SegmentPatternBindingMode::Normal
+    };
+
+    let span = name.span();
+    name.set_span(Span::call_site());
+
+    Ok(SegmentPattern::Binding {
+      span,
+      lifetime,
+      name,
+      mode,
+    })
+  }
+
+  fn parse_required_or_optional(input: ParseStream) -> Result<Self> {
+    let ident: Ident = input.parse()?;
+
+    let args = if input.peek(Token![<]) {
+      Some(input.parse()?)
+    } else {
+      None
+    };
+
+    let optional = if input.peek(Token![?]) {
+      input.parse::<Token![?]>()?;
+      true
+    } else {
+      false
+    };
+
+    let matcher = SegmentMatcher { ident, args };
+
+    Ok(if optional {
+      SegmentPattern::Optional(matcher)
+    } else {
+      SegmentPattern::Required(matcher)
+    })
+  }
+}
+
+fn parse_path_segments(input: ParseStream) -> Result<Vec<SegmentPattern>> {
+  let mut segments = Vec::new();
+
+  loop {
+    if input.peek(Token![$]) {
+      segments.push(SegmentPattern::parse_binding(input)?);
+    } else {
+      segments.push(SegmentPattern::parse_required_or_optional(input)?);
+    }
 
     if input.peek(Token![::]) {
       input.parse::<Token![::]>()?;
-      fully_qualified = true;
+    } else {
+      break;
     }
+  }
 
-    loop {
-      if input.peek(Token![$]) {
-        input.parse::<Token![$]>()?;
+  Ok(segments)
+}
 
-        let (lifetime, mut name) = if input.peek(syn::Lifetime) {
-          let lt: syn::Lifetime = input.parse()?;
-          (true, lt.ident)
-        } else {
-          (false, input.parse()?)
-        };
+fn parse_generic_binding(input: ParseStream) -> Result<(Span, bool, Ident)> {
+  input.parse::<Token![$]>()?;
 
-        let mode = if input.peek(Token![*]) {
-          input.parse::<Token![*]>()?;
-          SegmentPatternBindingMode::Multi
-        } else if input.peek(Token![?]) {
-          input.parse::<Token![?]>()?;
-          SegmentPatternBindingMode::Optional
-        } else {
-          SegmentPatternBindingMode::Normal
-        };
+  let (lifetime, mut name) = if input.peek(syn::Lifetime) {
+    let lt: syn::Lifetime = input.parse()?;
+    (true, lt.ident)
+  } else {
+    (false, input.parse()?)
+  };
 
-        let span = name.span();
-        name.set_span(Span::call_site());
+  let span = name.span();
+  name.set_span(Span::call_site());
 
-        segments.push(SegmentPattern::Binding {
-          span,
-          lifetime,
-          name,
-          mode,
-        });
+  Ok((span, lifetime, name))
+}
 
-        if input.peek(Token![::]) {
-          input.parse::<Token![::]>()?;
-        } else {
-          break;
-        }
-        continue;
+fn generate_wildcard_check(
+  lifetime: bool,
+  arg_idx: usize,
+) -> Option<TokenStream> {
+  if lifetime {
+    Some(quote! {
+      if let Some(syn::GenericArgument::Lifetime(_)) = __args.get(#arg_idx) {
+        //
+      } else {
+        break false;
       }
+    })
+  } else {
+    None
+  }
+}
 
+fn parse_path_pattern_in_generic(input: ParseStream, first_ident: Ident) -> Result<Vec<SegmentPattern>> {
+  let mut path_segments = Vec::new();
+  path_segments.push(SegmentPattern::Required(SegmentMatcher {
+    ident: first_ident,
+    args: None,
+  }));
+
+  loop {
+    if input.peek(Token![$]) {
+      let (span, lifetime, name) = parse_generic_binding(input)?;
+      path_segments.push(SegmentPattern::Binding {
+        span,
+        lifetime,
+        name,
+        mode: SegmentPatternBindingMode::Normal,
+      });
+
+      if input.peek(Token![::]) {
+        input.parse::<Token![::]>()?;
+      } else {
+        break;
+      }
+    } else {
       let ident: Ident = input.parse()?;
 
       let args = if input.peek(Token![<]) {
@@ -168,20 +248,7 @@ impl Parse for PathPattern {
         None
       };
 
-      let optional = if input.peek(Token![?]) {
-        input.parse::<Token![?]>()?;
-        true
-      } else {
-        false
-      };
-
-      let matcher = SegmentMatcher { ident, args };
-
-      segments.push(if optional {
-        SegmentPattern::Optional(matcher)
-      } else {
-        SegmentPattern::Required(matcher)
-      });
+      path_segments.push(SegmentPattern::Required(SegmentMatcher { ident, args }));
 
       if input.peek(Token![::]) {
         input.parse::<Token![::]>()?;
@@ -189,6 +256,26 @@ impl Parse for PathPattern {
         break;
       }
     }
+  }
+
+  Ok(path_segments)
+}
+
+impl Parse for PathPattern {
+  fn parse(input: ParseStream) -> Result<Self> {
+    if input.peek(Token![_]) {
+      input.parse::<Token![_]>()?;
+      return Ok(PathPattern::Wildcard);
+    }
+
+    let fully_qualified = if input.peek(Token![::]) {
+      input.parse::<Token![::]>()?;
+      true
+    } else {
+      false
+    };
+
+    let segments = parse_path_segments(input)?;
 
     Ok(PathPattern::Path {
       segments,
@@ -254,18 +341,7 @@ impl Parse for ArgumentPatterns {
         }
       } else if input.peek(Token![$]) {
         // binding
-        input.parse::<Token![$]>()?;
-
-        let (lifetime, mut name) = if input.peek(syn::Lifetime) {
-          let lt: syn::Lifetime = input.parse()?;
-          (true, lt.ident)
-        } else {
-          (false, input.parse()?)
-        };
-
-        let span = name.span();
-        name.set_span(Span::call_site());
-
+        let (span, lifetime, name) = parse_generic_binding(input)?;
         args.push(GenericArgumentPattern::Binding(span, lifetime, name));
       } else if input.peek(syn::token::Bracket) {
         // slice
@@ -276,15 +352,7 @@ impl Parse for ArgumentPatterns {
         let mut element_args = Vec::new();
 
         if content.peek(Token![$]) {
-          content.parse::<Token![$]>()?;
-          let (lifetime, mut name) = if content.peek(syn::Lifetime) {
-            let lt: syn::Lifetime = content.parse()?;
-            (true, lt.ident)
-          } else {
-            (false, content.parse()?)
-          };
-          let span = name.span();
-          name.set_span(Span::call_site());
+          let (span, lifetime, name) = parse_generic_binding(&content)?;
           element_args
             .push(GenericArgumentPattern::Binding(span, lifetime, name));
         } else {
@@ -307,69 +375,17 @@ impl Parse for ArgumentPatterns {
         input.parse::<Token![::]>()?;
 
         if input.peek(Token![$]) {
-          input.parse::<Token![$]>()?;
-
-          let (lifetime, mut name) = if input.peek(syn::Lifetime) {
-            let lt: syn::Lifetime = input.parse()?;
-            (true, lt.ident)
-          } else {
-            (false, input.parse()?)
-          };
-
-          let span = name.span();
-          name.set_span(Span::call_site());
-
+          let (span, lifetime, name) = parse_generic_binding(input)?;
           let path_segments = vec![SegmentPattern::Binding {
             span,
             lifetime,
             name,
             mode: SegmentPatternBindingMode::Normal,
           }];
-
           args.push(GenericArgumentPattern::PathPattern(path_segments));
         } else {
           let first_ident: Ident = input.parse()?;
-          let mut path_segments = Vec::new();
-          path_segments.push(SegmentPattern::Required(SegmentMatcher {
-            ident: first_ident,
-            args: None,
-          }));
-
-          while input.peek(Token![::]) {
-            input.parse::<Token![::]>()?;
-
-            if input.peek(Token![$]) {
-              input.parse::<Token![$]>()?;
-
-              let (lifetime, mut name) = if input.peek(syn::Lifetime) {
-                let lt: syn::Lifetime = input.parse()?;
-                (true, lt.ident)
-              } else {
-                (false, input.parse()?)
-              };
-
-              let span = name.span();
-              name.set_span(Span::call_site());
-
-              path_segments.push(SegmentPattern::Binding {
-                span,
-                lifetime,
-                name,
-                mode: SegmentPatternBindingMode::Normal,
-              });
-            } else {
-              let ident: Ident = input.parse()?;
-              let args = if input.peek(Token![<]) {
-                Some(input.parse()?)
-              } else {
-                None
-              };
-
-              path_segments
-                .push(SegmentPattern::Required(SegmentMatcher { ident, args }));
-            }
-          }
-
+          let path_segments = parse_path_pattern_in_generic(input, first_ident)?;
           args.push(GenericArgumentPattern::PathPattern(path_segments));
         }
       } else {
@@ -385,17 +401,7 @@ impl Parse for ArgumentPatterns {
             AssociatedTypes::Wildcard
           } else if input.peek(Token![$]) {
             // binding
-            input.parse::<Token![$]>()?;
-
-            let (lifetime, mut name) = if input.peek(syn::Lifetime) {
-              let lt: syn::Lifetime = input.parse()?;
-              (true, lt.ident)
-            } else {
-              (false, input.parse()?)
-            };
-
-            let span = name.span();
-            name.set_span(Span::call_site());
+            let (span, lifetime, name) = parse_generic_binding(input)?;
             AssociatedTypes::Binding(span, lifetime, name)
           } else {
             let value_ident: Ident = input.parse()?;
@@ -419,58 +425,7 @@ impl Parse for ArgumentPatterns {
           // path
           input.parse::<Token![::]>()?;
 
-          let mut path_segments = Vec::new();
-          path_segments.push(SegmentPattern::Required(SegmentMatcher {
-            ident: first_ident.clone(),
-            args: None,
-          }));
-
-          loop {
-            if input.peek(Token![$]) {
-              input.parse::<Token![$]>()?;
-
-              let (lifetime, mut name) = if input.peek(syn::Lifetime) {
-                let lt: syn::Lifetime = input.parse()?;
-                (true, lt.ident)
-              } else {
-                (false, input.parse()?)
-              };
-
-              let span = name.span();
-              name.set_span(Span::call_site());
-
-              path_segments.push(SegmentPattern::Binding {
-                span,
-                lifetime,
-                name,
-                mode: SegmentPatternBindingMode::Normal,
-              });
-
-              if input.peek(Token![::]) {
-                input.parse::<Token![::]>()?;
-              } else {
-                break;
-              }
-            } else {
-              let ident: Ident = input.parse()?;
-
-              let args = if input.peek(Token![<]) {
-                Some(input.parse()?)
-              } else {
-                None
-              };
-
-              path_segments
-                .push(SegmentPattern::Required(SegmentMatcher { ident, args }));
-
-              if input.peek(Token![::]) {
-                input.parse::<Token![::]>()?;
-              } else {
-                break;
-              }
-            }
-          }
-
+          let path_segments = parse_path_pattern_in_generic(input, first_ident.clone())?;
           args.push(GenericArgumentPattern::PathPattern(path_segments));
         } else {
           let matcher = SegmentMatcher {
@@ -499,9 +454,9 @@ impl Parse for ArgumentPatterns {
 
 struct PathMatcher {
   path_expr: Expr,
-  fully_qualified_check: proc_macro2::TokenStream,
-  length_check: proc_macro2::TokenStream,
-  segment_checks: Vec<proc_macro2::TokenStream>,
+  fully_qualified_check: TokenStream,
+  length_check: TokenStream,
+  segment_checks: Vec<TokenStream>,
   binding_names: Vec<(Span, bool, Ident, SegmentPatternBindingMode)>,
 }
 
@@ -728,7 +683,7 @@ fn generate_path_matcher(
           fn handle_segment_matcher(
             matcher: &SegmentMatcher,
             is_optional: bool,
-          ) -> proc_macro2::TokenStream {
+          ) -> TokenStream {
             let seg_ident = &matcher.ident;
             let seg_ident_str = seg_ident.to_string();
 
@@ -742,22 +697,17 @@ fn generate_path_matcher(
               let mut arg_checks = Vec::new();
               for (arg_idx, arg_pattern) in arg_patterns.iter().enumerate() {
                 match arg_pattern {
-                  GenericArgumentPattern::Wildcard(false) => {}
-                  GenericArgumentPattern::Wildcard(true) => {
-                    arg_checks.push(quote! {
-                        if let Some(syn::GenericArgument::Lifetime(_)) = __args.get(#arg_idx) {
-                          //
-                        } else {
-                          break false;
-                        }
-                      });
+                  GenericArgumentPattern::Wildcard(lifetime) => {
+                    if let Some(check) = generate_wildcard_check(*lifetime, arg_idx) {
+                      arg_checks.push(check);
+                    }
                   }
                   GenericArgumentPattern::Argument(segment_matcher) => {
                     fn generate_nested_arg_check(
                       segment_matcher: &SegmentMatcher,
                       arg_var: &str,
                       depth: usize,
-                    ) -> proc_macro2::TokenStream {
+                    ) -> TokenStream {
                       let arg_ident = &segment_matcher.ident;
                       let arg_ident_str = arg_ident.to_string();
                       let arg_var_ident =
@@ -981,24 +931,20 @@ fn generate_path_matcher(
                       }
                     });
                   }
-                  GenericArgumentPattern::Binding(_span, lifetime, name) => {
-                    if *lifetime {
-                      arg_checks.push(quote! {
-                        if let Some(syn::GenericArgument::Lifetime(__arg)) = __args.get(#arg_idx) {
-                          #name = Some(__arg);
-                        } else {
-                          break false;
-                        }
-                      });
+                  GenericArgumentPattern::Binding(_, lifetime, name) => {
+                    let ident = if *lifetime {
+                      quote!(syn::GenericArgument::Lifetime(__arg))
                     } else {
-                      arg_checks.push(quote! {
-                        if let Some(__arg) = __args.get(#arg_idx) {
-                          #name = Some(__arg);
-                        } else {
-                          break false;
-                        }
-                      });
-                    }
+                      quote!(__arg)
+                    };
+
+                    arg_checks.push(quote! {
+                      if let Some(#ident) = __args.get(#arg_idx) {
+                        #name = Some(__arg);
+                      } else {
+                        break false;
+                      }
+                    });
                   }
                   GenericArgumentPattern::AssociatedType(
                     _span,
@@ -1074,111 +1020,64 @@ fn generate_path_matcher(
                     }
                   }
                   GenericArgumentPattern::PathPattern(path_segments) => {
-                    if path_segments.len() == 1 {
-                      if let SegmentPattern::Binding { name, .. } =
-                        &path_segments[0]
-                      {
-                        arg_checks.push(quote! {
-                          if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
-                            #name = Some(&__type_path.path);
-                          } else {
-                            break false;
-                          }
-                        });
-                      } else {
-                        let mut path_checks = Vec::new();
-                        for (_seg_idx, seg) in path_segments.iter().enumerate()
-                        {
-                          match seg {
-                            SegmentPattern::Required(matcher) => {
-                              let ident = &matcher.ident;
-                              let ident_str = ident.to_string();
-                              path_checks.push(quote! {
-                                if __path_seg_idx >= __path_segments.len() {
-                                  __path_matched = false;
-                                  break;
-                                }
-                                if __path_segments[__path_seg_idx].ident != #ident_str {
-                                  __path_matched = false;
-                                  break;
-                                }
-                                __path_seg_idx += 1;
-                              });
-                            }
-                            _ => {}
-                          }
+                    if path_segments.len() == 1 &&  let SegmentPattern::Binding { name, .. } = &path_segments[0]  {
+                      arg_checks.push(quote! {
+                        if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
+                          #name = Some(&__type_path.path);
+                        } else {
+                          break false;
                         }
-
-                        arg_checks.push(quote! {
-                          if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
-                            let __path_segments = &__type_path.path.segments;
-                            let mut __path_seg_idx = 0;
-                            let mut __path_matched = true;
-
-                            loop {
-                              #(#path_checks)*
-                              break;
-                            }
-
-                            if !__path_matched || __path_seg_idx != __path_segments.len() {
-                              break false;
-                            }
-                          } else {
-                            break false;
-                          }
-                        });
-                      }
+                      });
                     } else {
-                      let mut path_checks = Vec::new();
-                      for (_seg_idx, seg) in path_segments.iter().enumerate() {
+                      let path_checks: Vec<_> = path_segments.iter().map(|seg| {
                         match seg {
                           SegmentPattern::Required(matcher) => {
                             let ident = &matcher.ident;
                             let ident_str = ident.to_string();
-                            path_checks.push(quote! {
-                              if __path_seg_idx >= __path_segments.len() {
-                                __path_matched = false;
-                                break;
-                              }
-                              if __path_segments[__path_seg_idx].ident != #ident_str {
-                                __path_matched = false;
-                                break;
-                              }
-                              __path_seg_idx += 1;
-                            });
+                            quote! {
+        if __path_seg_idx >= __path_segments.len() {
+          __path_matched = false;
+          break;
+        }
+        if __path_segments[__path_seg_idx].ident != #ident_str {
+          __path_matched = false;
+          break;
+        }
+        __path_seg_idx += 1;
+      }
                           }
                           SegmentPattern::Binding { name, .. } => {
-                            path_checks.push(quote! {
-                              if __path_seg_idx >= __path_segments.len() {
-                                __path_matched = false;
-                                break;
-                              }
-                              #name = Some(&__path_segments[__path_seg_idx]);
-                              __path_seg_idx += 1;
-                            });
+                            quote! {
+        if __path_seg_idx >= __path_segments.len() {
+          __path_matched = false;
+          break;
+        }
+        #name = Some(&__path_segments[__path_seg_idx]);
+        __path_seg_idx += 1;
+      }
                           }
-                          _ => {} // TODO: Handle other segment patterns
+                          _ => quote!(), // TODO: Handle other segment patterns
                         }
-                      }
+                      }).collect();
 
                       arg_checks.push(quote! {
-                          if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
-                            let __path_segments = &__type_path.path.segments;
-                            let mut __path_seg_idx = 0;
-                            let mut __path_matched = true;
+    if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
+      let __path_segments = &__type_path.path.segments;
+      let mut __path_seg_idx = 0;
+      let mut __path_matched = true;
 
-                            loop {
-                              #(#path_checks)*
-                              break;
-                            }
+      loop {
+        #(#path_checks)*
+        break;
+      }
 
-                            if !__path_matched || __path_seg_idx != __path_segments.len() {
-                              break false;
-                            }
-                          } else {
-                            break false;
-                          }
-                        });
+      if !__path_matched || __path_seg_idx != __path_segments.len() {
+        break false;
+      }
+    } else {
+      break false;
+    }
+  });
                     }
                   }
                 }
@@ -1279,7 +1178,7 @@ fn generate_path_matcher(
 }
 
 #[proc_macro]
-pub fn path_match(input: TokenStream) -> TokenStream {
+pub fn path_match(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
   let Body { path, arms } = parse_macro_input!(input as Body);
 
   let wildcard_arm = arms.last().filter(|arm| {
@@ -1409,5 +1308,5 @@ pub fn path_match(input: TokenStream) -> TokenStream {
     })()
   };
 
-  TokenStream::from(expanded)
+  proc_macro::TokenStream::from(expanded)
 }
