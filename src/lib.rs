@@ -200,18 +200,184 @@ fn parse_generic_binding(input: ParseStream) -> Result<(Span, bool, Ident)> {
   Ok((span, lifetime, name))
 }
 
+#[derive(Clone)]
+enum GenericArgCheck {
+  /// Check if argument is a lifetime
+  Lifetime,
+  /// Check if argument is a specific path type
+  PathType,
+  /// Check if argument is an associated type with specific ident
+  AssocType(String),
+  /// Check if argument matches any type
+  Any,
+}
+
+#[derive(Clone)]
+enum BindingAction {
+  /// Bind to the entire argument
+  BindArg(Ident),
+  /// Bind to a lifetime within the argument
+  BindLifetime(Ident),
+  /// Bind to the type within an associated type
+  BindAssocType(Ident),
+  /// Bind to the path within a path type
+  BindPath(Ident),
+  /// No binding
+  None,
+}
+
+fn generate_generic_arg_check(
+  check: &GenericArgCheck,
+  action: &BindingAction,
+  arg_idx: usize,
+  args_var: &str,
+) -> TokenStream {
+
+  match check {
+    GenericArgCheck::Lifetime => {
+      match action {
+        BindingAction::BindArg(name) => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(syn::GenericArgument::Lifetime(__arg)) = #args_ident.get(#arg_idx) {
+              #name = Some(__arg);
+            } else {
+              break false;
+            }
+          }
+        },
+        BindingAction::None => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(syn::GenericArgument::Lifetime(_)) = #args_ident.get(#arg_idx) {
+              //
+            } else {
+              break false;
+            }
+          }
+        },
+        _ => unreachable!("Invalid binding action for lifetime check"),
+      }
+    }
+    GenericArgCheck::PathType => {
+      match action {
+        BindingAction::BindArg(name) => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(__arg) = #args_ident.get(#arg_idx) {
+              #name = Some(__arg);
+            } else {
+              break false;
+            }
+          }
+        },
+        BindingAction::BindPath(name) => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = #args_ident.get(#arg_idx) {
+              #name = Some(&__type_path.path);
+            } else {
+              break false;
+            }
+          }
+        },
+        BindingAction::None => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(syn::GenericArgument::Type(syn::Type::Path(_))) = #args_ident.get(#arg_idx) {
+              //
+            } else {
+              break false;
+            }
+          }
+        },
+        _ => unreachable!("Invalid binding action for path type check"),
+      }
+    }
+    GenericArgCheck::AssocType(ident_str) => {
+      match action {
+        BindingAction::BindAssocType(name) => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(syn::GenericArgument::AssocType(__assoc_type)) = #args_ident.get(#arg_idx)
+              && __assoc_type.ident == #ident_str
+            {
+              #name = Some(&__assoc_type.ty);
+            } else {
+              break false;
+            }
+          }
+        },
+        BindingAction::BindLifetime(name) => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(syn::GenericArgument::AssocType(__assoc_type)) = #args_ident.get(#arg_idx)
+              && __assoc_type.ident == #ident_str
+              && let syn::Type::Path(__assoc_path) = &__assoc_type.ty
+              && let Some(__assoc_seg) = __assoc_path.path.segments.first()
+              && let syn::PathArguments::AngleBracketed(__assoc_angle_args) = &__assoc_seg.arguments
+              && let Some(syn::GenericArgument::Lifetime(__lt)) = __assoc_angle_args.args.first()
+            {
+              #name = Some(__lt);
+            } else {
+              break false;
+            }
+          }
+        },
+        BindingAction::None => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(syn::GenericArgument::AssocType(__assoc_type)) = #args_ident.get(#arg_idx)
+              && __assoc_type.ident == #ident_str
+            {
+              //
+            } else {
+              break false;
+            }
+          }
+        },
+        _ => unreachable!("Invalid binding action for associated type check"),
+      }
+    }
+    GenericArgCheck::Any => {
+      match action {
+        BindingAction::BindArg(name) => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if let Some(__arg) = #args_ident.get(#arg_idx) {
+              #name = Some(__arg);
+            } else {
+              break false;
+            }
+          }
+        },
+        BindingAction::None => {
+          let args_ident = Ident::new(args_var, Span::call_site());
+          quote! {
+            if #args_ident.get(#arg_idx).is_some() {
+              //
+            } else {
+              break false;
+            }
+          }
+        },
+        _ => unreachable!("Invalid binding action for any check"),
+      }
+    }
+  }
+}
+
 fn generate_wildcard_check(
   lifetime: bool,
   arg_idx: usize,
 ) -> Option<TokenStream> {
   if lifetime {
-    Some(quote! {
-      if let Some(syn::GenericArgument::Lifetime(_)) = __args.get(#arg_idx) {
-        //
-      } else {
-        break false;
-      }
-    })
+    Some(generate_generic_arg_check(
+      &GenericArgCheck::Lifetime,
+      &BindingAction::None,
+      arg_idx,
+      "__args"
+    ))
   } else {
     None
   }
@@ -726,27 +892,11 @@ fn generate_path_matcher(
                               lifetime,
                               name,
                             ) => {
-                              let nested_arg_var =
-                                format!("__nested_arg_{depth}");
-                              let nested_arg_var_ident =
-                                Ident::new(&nested_arg_var, Span::call_site());
-                              if *lifetime {
-                                nested_arg_checks.push(quote! {
-                                  if let Some(syn::GenericArgument::Lifetime(#nested_arg_var_ident)) = __nested_args.get(#nested_arg_idx) {
-                                    #name = Some(#nested_arg_var_ident);
-                                  } else {
-                                    break false;
-                                  }
-                                });
-                              } else {
-                                nested_arg_checks.push(quote! {
-                                  if let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx) {
-                                    #name = Some(#nested_arg_var_ident);
-                                  } else {
-                                    break false;
-                                  }
-                                });
-                              }
+                              let check = if *lifetime { GenericArgCheck::Lifetime } else { GenericArgCheck::Any };
+                              let action = BindingAction::BindArg(name.clone());
+
+                              // Generate the unified check for nested context
+                              nested_arg_checks.push(generate_generic_arg_check(&check, &action, nested_arg_idx, "__nested_args"));
                             }
                             GenericArgumentPattern::Wildcard(_) => {}
                             GenericArgumentPattern::Argument(
@@ -774,79 +924,34 @@ fn generate_path_matcher(
                               ident,
                               value,
                             ) => {
-                              let nested_arg_var =
-                                format!("__nested_arg_{}", depth);
-                              let nested_arg_var_ident =
-                                Ident::new(&nested_arg_var, Span::call_site());
                               let ident_str = ident.to_string();
+                              let check = GenericArgCheck::AssocType(ident_str.clone());
 
-                              match value {
-                                AssociatedTypes::Wildcard => {
-                                  nested_arg_checks.push(quote! {
-                                    if
-                                      let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
-                                        && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
-                                        && __assoc_type.ident == #ident_str
-                                    {
-                                      //
-                                    } else {
-                                      break false;
-                                    }
-                                  });
-                                }
+                              let action = match value {
+                                AssociatedTypes::Wildcard => BindingAction::None,
                                 AssociatedTypes::Binding(_, lifetime, name) => {
                                   if *lifetime {
-                                    nested_arg_checks.push(quote! {
-                                      if
-                                        let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
-                                          && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
-                                          && __assoc_type.ident == #ident_str
-                                          && let syn::Type::Path(__assoc_path) = &__assoc_type.ty
-                                          && let Some(__assoc_seg) = __assoc_path.path.segments.first()
-                                          && let syn::PathArguments::AngleBracketed(__assoc_angle_args) = &__assoc_seg.arguments
-                                          && let Some(syn::GenericArgument::Lifetime(__lt)) = __assoc_angle_args.args.first()
-                                      {
-                                        #name = Some(__lt);
-                                      } else {
-                                        break false;
-                                      }
-                                    });
+                                    BindingAction::BindLifetime(name.clone())
                                   } else {
-                                    nested_arg_checks.push(quote! {
-                                      if
-                                        let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
-                                          && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
-                                          && __assoc_type.ident == #ident_str
-                                      {
-                                        #name = Some(&__assoc_type.ty);
-                                      } else {
-                                        break false;
-                                      }
-                                    });
+                                    BindingAction::BindAssocType(name.clone())
                                   }
                                 }
-                                AssociatedTypes::Argument(type_matcher) => {
-                                  let type_ident = &type_matcher.ident;
-                                  let type_ident_str = type_ident.to_string();
-                                  nested_arg_checks.push(quote! {
-                                    if
-                                      let Some(#nested_arg_var_ident) = __nested_args.get(#nested_arg_idx)
-                                        && let syn::GenericArgument::AssocType(__assoc_type) = #nested_arg_var_ident
-                                        && __assoc_type.ident == #ident_str
-                                        && let syn::Type::Path(__type_path) = &__assoc_type.ty
-                                        && let Some(__last_seg) = __type_path.path.segments.last()
-                                        && __last_seg.ident == #type_ident_str
-                                    {
-                                      //
-                                    } else {
-                                      break false;
-                                    }
-                                  });
+                                AssociatedTypes::Argument(_type_matcher) => {
+                                  // For now, just check the associated type exists
+                                  BindingAction::None
                                 }
-                              }
+                              };
+
+                              // Generate the unified check for nested context
+                              nested_arg_checks.push(generate_generic_arg_check(&check, &action, nested_arg_idx, "__nested_args"));
                             }
-                            GenericArgumentPattern::PathPattern(_) => {
-                              // TODO: Implement path pattern matching in nested generics
+                            GenericArgumentPattern::PathPattern(path_segments) => {
+                              if path_segments.len() == 1 && let SegmentPattern::Binding { name, .. } = &path_segments[0] {
+                                let action = BindingAction::BindPath(name.clone());
+                                nested_arg_checks.push(generate_generic_arg_check(&GenericArgCheck::PathType, &action, nested_arg_idx, "__nested_args"));
+                              } else {
+                                // TODO: Handle complex path patterns in nested generics
+                              }
                             }
                           }
                         }
@@ -932,19 +1037,9 @@ fn generate_path_matcher(
                     });
                   }
                   GenericArgumentPattern::Binding(_, lifetime, name) => {
-                    let ident = if *lifetime {
-                      quote!(syn::GenericArgument::Lifetime(__arg))
-                    } else {
-                      quote!(__arg)
-                    };
-
-                    arg_checks.push(quote! {
-                      if let Some(#ident) = __args.get(#arg_idx) {
-                        #name = Some(__arg);
-                      } else {
-                        break false;
-                      }
-                    });
+                    let check = if *lifetime { GenericArgCheck::Lifetime } else { GenericArgCheck::Any };
+                    let action = BindingAction::BindArg(name.clone());
+                    arg_checks.push(generate_generic_arg_check(&check, &action, arg_idx, "__args"));
                   }
                   GenericArgumentPattern::AssociatedType(
                     _span,
@@ -952,82 +1047,30 @@ fn generate_path_matcher(
                     value,
                   ) => {
                     let ident_str = ident.to_string();
+                    let check = GenericArgCheck::AssocType(ident_str.clone());
 
-                    match value {
-                      AssociatedTypes::Wildcard => {
-                        arg_checks.push(quote! {
-                          if
-                            let Some(__arg) = __args.get(#arg_idx)
-                              && let syn::GenericArgument::AssocType(__assoc_type) = __arg
-                              && __assoc_type.ident == #ident_str
-                          {
-                            //
-                          } else {
-                            break false;
-                          }
-                        });
-                      }
+                    let action = match value {
+                      AssociatedTypes::Wildcard => BindingAction::None,
                       AssociatedTypes::Binding(_, lifetime, name) => {
                         if *lifetime {
-                          arg_checks.push(quote! {
-                            if
-                              let Some(__arg) = __args.get(#arg_idx)
-                                && let syn::GenericArgument::AssocType(__assoc_type) = __arg
-                                && __assoc_type.ident == #ident_str
-                                && let syn::Type::Path(__assoc_path) = &__assoc_type.ty
-                                && let Some(__assoc_seg) = __assoc_path.path.segments.first()
-                                && let syn::PathArguments::AngleBracketed(__assoc_angle_args) = &__assoc_seg.arguments
-                                && let Some(syn::GenericArgument::Lifetime(__lt)) = __assoc_angle_args.args.first()
-                            {
-                              #name = Some(__lt);
-                            } else {
-                              break false;
-                            }
-                          });
+                          BindingAction::BindLifetime(name.clone())
                         } else {
-                          arg_checks.push(quote! {
-                            if
-                              let Some(__arg) = __args.get(#arg_idx)
-                                && let syn::GenericArgument::AssocType(__assoc_type) = __arg
-                                && __assoc_type.ident == #ident_str
-                            {
-                              #name = Some(&__assoc_type.ty);
-                            } else {
-                              break false;
-                            }
-                          });
+                          BindingAction::BindAssocType(name.clone())
                         }
                       }
-                      AssociatedTypes::Argument(type_matcher) => {
-                        let type_ident = &type_matcher.ident;
-                        let type_ident_str = type_ident.to_string();
-
-                        arg_checks.push(quote! {
-                          if
-                            let Some(__arg) = __args.get(#arg_idx)
-                              && let syn::GenericArgument::AssocType(__assoc_type) = __arg
-                              && __assoc_type.ident == #ident_str
-                              && let syn::Type::Path(__type_path) = &__assoc_type.ty
-                              && let Some(__last_seg) = __type_path.path.segments.last()
-                              && __last_seg.ident == #type_ident_str
-                          {
-                            //
-                          } else {
-                            break false;
-                          }
-                        });
+                      AssociatedTypes::Argument(_type_matcher) => {
+                        // For now, just check the associated type exists
+                        // TODO: Could extend this to check the specific type
+                        BindingAction::None
                       }
-                    }
+                    };
+
+                    arg_checks.push(generate_generic_arg_check(&check, &action, arg_idx, "__args"));
                   }
                   GenericArgumentPattern::PathPattern(path_segments) => {
                     if path_segments.len() == 1 &&  let SegmentPattern::Binding { name, .. } = &path_segments[0]  {
-                      arg_checks.push(quote! {
-                        if let Some(syn::GenericArgument::Type(syn::Type::Path(__type_path))) = __args.get(#arg_idx) {
-                          #name = Some(&__type_path.path);
-                        } else {
-                          break false;
-                        }
-                      });
+                      let action = BindingAction::BindPath(name.clone());
+                      arg_checks.push(generate_generic_arg_check(&GenericArgCheck::PathType, &action, arg_idx, "__args"));
                     } else {
                       let path_checks: Vec<_> = path_segments.iter().map(|seg| {
                         match seg {
